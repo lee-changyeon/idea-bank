@@ -1,0 +1,33 @@
+{
+  "_note": "데모용 가짜 계정입니다. 실제 개인정보·비밀번호를 넣지 마세요. 운영 환경에서는 이 파일을 쓰지 마세요.",
+  "admins": [
+    {"username": "admin", "name": "운영관리자(데모)", "password": "demo-admin-2026!"},
+    {"username": "ceo", "name": "이창연", "password": "demo-ceo-2026!"},
+    {"username": "hana", "name": "하나(기획·PM)", "password": "demo-hana-2026!"},
+    {"username": "coda", "name": "코다(개발)", "password": "demo-coda-2026!"},
+    {"username": "gard", "name": "가드(QA·보안)", "password": "demo-gard-2026!"},
+    {"username": "loy", "name": "로이(법률·IP)", "password": "demo-loy-2026!"},
+    {"username": "mio", "name": "미오(마케팅·콘텐츠)", "password": "demo-mio-2026!"},
+    {"username": "ben", "name": "벤(사업개발·전략)", "password": "demo-ben-2026!"},
+    {"username": "sori", "name": "소리(고객지원)", "password": "demo-sori-2026!"}
+  ],
+  "users": [
+    {"key": "c1", "email": "creator1@example.com", "name": "김창안", "role": "creator", "org": "", "password": "demo-creator-1!"},
+    {"key": "c2", "email": "creator2@example.com", "name": "이발상", "role": "creator", "org": "", "password": "demo-creator-2!"},
+    {"key": "b1", "email": "biz@example.com", "name": "박사업", "role": "business", "org": "예시상사(주)", "password": "demo-business-1!"}
+  ],
+  "ideas": [
+    {"owner": "c1", "title": "자전거 거치대 겸용 우산꽂이", "tags": ["생활용품", "자전거"],
+     "body": "[무엇] 자전거 거치대와 우산꽂이를 하나로 합친 현관용 제품 (예시 데이터)\n[왜] 아파트 현관에 자전거와 우산이 따로 놓여 공간을 많이 차지함\n[어떻게] 거치대 기둥 안쪽을 비워 우산을 세로로 꽂고, 바닥 받침에 물받이를 둔다\n[특징] 기둥 높이 조절 가능, 우산 4개까지 수납",
+     "disclosure": "nda", "summary": "현관 공간을 줄이는 자전거 거치대·우산꽂이 일체형 제품 콘셉트입니다. 구조와 치수는 NDA 후 공개합니다."},
+    {"owner": "c1", "title": "동네 공구 대여 무인함", "tags": ["공유경제", "생활"],
+     "body": "[무엇] 아파트 단지 안에 전동드릴·사다리 등을 빌려 쓰는 무인 대여함 (예시 데이터)\n[어떻게] 앱으로 예약하고 QR 로 칸을 연다. 반납 시 무게 센서로 확인한다.",
+     "disclosure": "summary", "summary": "아파트 단지용 공구 무인 대여함. 예약·반납을 앱과 센서로 처리하는 구조입니다."},
+    {"owner": "c2", "title": "음성 메모를 요리 순서로 바꾸는 주방 도우미", "tags": ["주방", "음성"],
+     "body": "[무엇] 요리하며 말한 메모를 단계별 레시피 카드로 정리해 주는 기기 (예시 데이터)\n[왜] 손에 재료가 묻어 있으면 메모를 적기 어렵다",
+     "disclosure": "nda", "summary": "요리 중 음성 메모를 단계별 레시피로 정리하는 주방 기기 아이디어입니다."},
+    {"owner": "c2", "title": "아직 공개하지 않을 메모 (비공개 예시)", "tags": ["메모"],
+     "body": "비공개 아이디어 예시입니다. 사업자에게도, 관리자에게도 본문이 보이지 않아야 합니다.",
+     "disclosure": "private", "summary": ""}
+  ]
+}

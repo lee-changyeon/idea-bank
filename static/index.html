@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>아이디어뱅크</title>
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap top-in">
+    <a class="brand" href="#new" aria-label="아이디어뱅크 처음 화면">
+      <img src="logo.svg" alt="" width="34" height="34">
+      <span><b>아이디어뱅크</b><small>by FirstPrint</small></span>
+    </a>
+    <nav class="nav" aria-label="메뉴">
+      <a href="#new" data-nav="new">등록</a>
+      <a href="#list" data-nav="list">보관함</a>
+      <a href="#verify" data-nav="verify">검증</a>
+      <a href="#help" data-nav="help">도움말</a>
+    </nav>
+    <div class="ledger" id="ledger" title="보관함 상태">…</div>
+  </div>
+</header>
+<main class="wrap" id="view" tabindex="-1"></main>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

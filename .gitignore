@@ -1,0 +1,18 @@
+data/
+__pycache__/
+*.pyc
+
+# 운영 데이터 (DB, 비밀번호 해시, 감사 로그, 첨부)
+web/data/
+
+# 1호 아이디어 원문·증명 파일과 상세 검토 (공개 저장소에서 제외)
+ideas/
+exports/
+docs/IDEA-001_*.md
+docs/contracts/
+
+# 로컬 도구 설정·개인 캡처
+.claude/
+*.PNG
+*.png
+!brand/*.png

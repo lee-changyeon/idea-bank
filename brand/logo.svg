@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="FirstPrint 로고">
+  <rect width="120" height="120" rx="28" fill="#141A2B"/>
+  <g fill="none" stroke="#F3F1EA" stroke-width="5" stroke-linecap="round">
+    <path d="M38 84 Q30 60 44 44 Q60 28 78 38"/>
+    <path d="M48 88 Q40 64 52 52 Q62 44 72 52 Q80 60 76 74"/>
+    <path d="M58 90 Q52 72 58 64 Q64 58 68 66 Q70 76 66 88"/>
+    <path d="M86 50 Q94 66 86 88"/>
+  </g>
+  <circle cx="86" cy="34" r="9" fill="#FFB547"/>
+</svg>
