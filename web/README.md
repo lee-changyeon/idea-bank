@@ -90,6 +90,12 @@ admin/
   - 아이디어 수정·삭제 API 는 없습니다. 관리자는 공개 목록에서 숨기는 것만 할 수 있고, 사유가 기록됩니다.
 - 보안 헤더: CSP(`'self'` 만 허용, 인라인 스크립트·스타일 없음), `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy`.
 
+### 온라인 배포 (Vercel + Supabase)
+- 사용자 웹만 온라인에 올립니다. 관리자 사이트는 로컬 전용입니다.
+- `DATABASE_URL` 이 있으면 Postgres(Supabase), `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` 가 있으면 첨부를 Supabase Storage 에 둡니다. 없으면 지금처럼 SQLite + `web/data/files` 입니다.
+- 설계와 환경 변수: [`DEPLOY_SUPABASE.md`](DEPLOY_SUPABASE.md). Vercel 입구는 루트의 `api/index.py`, `vercel.json` 입니다.
+- 전체 흐름 점검: `python web/tools/smoke.py <주소>` (로컬 테스트는 `tests/test_web.py` 가 임시 DB 로 같은 흐름을 돌립니다).
+
 ## 3. 아직 모의(목업)인 것
 
 | 항목 | 지금 | 실제 서비스 전에 할 일 |

@@ -16,3 +16,8 @@ docs/contracts/
 *.PNG
 *.png
 !brand/*.png
+
+# 비밀 값 (DB 주소, Supabase 키) — 저장소에 넣지 않음
+.env
+.env.*
+.vercel/

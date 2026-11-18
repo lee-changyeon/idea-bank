@@ -15,7 +15,8 @@ import time
 from ideabank import canonical as C
 from ideabank import tsa
 
-from .db import DATA_DIR, DB
+from . import files as F
+from .db import DB
 
 EVENT_SCHEMA = "ideabank-event/1"
 MAX_TRIES = 8
@@ -57,13 +58,30 @@ def append(conn, kind: str, payload: bytes, actor: str, idea_seq: int | None = N
     return {"seq": seq, "content_hash": ch, "entry_hash": eh, "prev_hash": prev}
 
 
-class Stamper:
-    """공인 시각 받기. 등록은 즉시(동기) 시도하고, 나머지는 백그라운드 작업자가 처리한다."""
+class InlineWake:
+    """서버리스(Vercel)용: 요청이 끝나면 스레드가 살아 있지 않으므로, wake.set() 때 대기 이벤트를 짧게 바로 처리한다.
+    놓친 것은 Vercel Cron 이 GET /api/cron/tsa 로 다시 시도한다."""
 
-    def __init__(self, db: DB, urls: list[str]):
+    def __init__(self, stamper: "Stamper", limit=4, budget=6.0):
+        self.stamper, self.limit, self.budget = stamper, limit, budget
+
+    def set(self):
+        try:
+            self.stamper.run_pending(limit=self.limit, deadline=time.monotonic() + self.budget)
+        except Exception as ex:  # 공인 시각 실패가 사용자 요청을 막지 않는다
+            print("[공인 시각] 바로 처리 실패:", ex)
+
+    def clear(self):
+        pass
+
+
+class Stamper:
+    """공인 시각 받기. 등록은 즉시(동기) 시도하고, 나머지는 백그라운드 작업자(로컬) 또는 요청 끝·Cron(온라인)이 처리한다."""
+
+    def __init__(self, db: DB, urls: list[str], inline: bool = False):
         self.db = db
         self.urls = urls
-        self.wake = threading.Event()
+        self.wake = InlineWake(self) if inline else threading.Event()
         self._lock = threading.Lock()
 
     def stamp(self, seq: int) -> dict:
@@ -86,10 +104,12 @@ class Stamper:
         return [r[0] for r in self.db.q(
             "SELECT seq FROM events WHERE tsa_token IS NULL AND tsa_tries < ? ORDER BY seq LIMIT ?", (max_tries, limit))]
 
-    def run_pending(self, max_tries=MAX_TRIES) -> dict:
+    def run_pending(self, max_tries=MAX_TRIES, limit=50, deadline: float | None = None) -> dict:
         with self._lock:
             done = fail = 0
-            for seq in self.pending(50, max_tries):
+            for seq in self.pending(limit, max_tries):
+                if deadline is not None and time.monotonic() > deadline:
+                    break
                 if self.stamp(seq)["ok"]:
                     done += 1
                 else:
@@ -139,8 +159,11 @@ def verify_chain(db: DB) -> dict:
                     broken.append({"seq": seq, "reason": f"{idea['idea_no']} 원문이 원장과 다름"})
                 doc = json.loads(payload)
                 for a in doc.get("attachments", []):
-                    p = DATA_DIR / "files" / a["sha256"]
-                    if not p.exists() or C.sha256_hex(p.read_bytes()) != a["sha256"]:
+                    try:
+                        same = C.sha256_hex(F.get(a["sha256"])) == a["sha256"]
+                    except (FileNotFoundError, OSError, ValueError):
+                        same = False
+                    if not same:
                         broken.append({"seq": seq, "reason": f"첨부 '{a['name']}' 파일이 없거나 바뀜"})
         if r["tsa_token"]:
             try:

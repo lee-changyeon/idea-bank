@@ -5,25 +5,30 @@
 from __future__ import annotations
 
 import base64
+import hmac
+import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ibweb import config, ledger as L, proof, security as S, service as svc  # noqa: E402
-from ibweb.db import DB  # noqa: E402
-from ibweb.httpkit import App, HttpError, Response, bad, download  # noqa: E402
+from ibweb.db import open_db  # noqa: E402
+from ibweb.httpkit import ON_VERCEL, App, HttpError, Response, bad, download, forbidden  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 CFG = config.load()
-db = DB()
-stamper = L.Stamper(db, CFG["tsa_urls"])
+db = open_db()  # DATABASE_URL 이 있으면 Postgres(Supabase), 없으면 web/data 의 SQLite
+# 온라인(Vercel)에는 백그라운드 스레드가 없으므로 요청 끝에서 바로 공인 시각을 받고, 놓친 것은 Cron 이 처리
+stamper = L.Stamper(db, CFG["tsa_urls"], inline=ON_VERCEL)
 app = App("아이디어뱅크 웹", db, "user", "ib_sess", [HERE / "static"])
-throttle = S.Throttle()
+throttle = S.Throttle(db=db)
 
 
 def me(req):
-    return {"user": svc.public_user(req.user) if req.user else None, "csrf": req.session["csrf"] if req.session else None}
+    return {"user": svc.public_user(req.user) if req.user else None, "csrf": req.session["csrf"] if req.session else None,
+            "limits": svc.LIMITS}
 
 
 # ── 계정 ──
@@ -67,6 +72,23 @@ def r_logout(req):
 @app.route("GET", "/api/ledger")
 def r_ledger(req):
     return svc.ledger_status(db)
+
+
+@app.route("GET", "/api/ledger/verify")
+def r_ledger_verify(req):
+    """원장 무결성 검사 (누구나). 순번·고유 지문·고리값·공인 시각·첨부 해시만 검사하고 내용은 돌려주지 않는다."""
+    out = L.verify_chain(db)
+    return {k: out[k] for k in ("ok", "count", "head", "pending", "broken", "checked_at")}
+
+
+@app.route("GET", "/api/cron/tsa")
+def r_cron_tsa(req):
+    """Vercel Cron: 공인 시각을 못 받은 이벤트를 다시 시도. Authorization: Bearer <CRON_SECRET> 일 때만."""
+    secret = os.environ.get("CRON_SECRET", "")
+    got = req.h.headers.get("Authorization") or ""
+    if not secret or not hmac.compare_digest(got, f"Bearer {secret}"):
+        raise forbidden()
+    return stamper.run_pending(limit=40, deadline=time.monotonic() + 50)
 
 
 @app.route("GET", "/api/lookup/{h}")

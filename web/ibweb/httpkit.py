@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import re
 import traceback
 from http.cookies import SimpleCookie
@@ -13,6 +14,9 @@ from urllib.parse import parse_qs, quote, urlparse
 from . import security as S
 
 MAX_BODY = 30 * 1024 * 1024
+ON_VERCEL = bool(os.environ.get("VERCEL"))
+# 운영(HTTPS)에서는 쿠키에 Secure 를 붙인다. 로컬 http://localhost 에서는 붙이면 쿠키가 저장되지 않는다.
+SECURE_COOKIES = ON_VERCEL or os.environ.get("IB_SECURE_COOKIES") == "1"
 
 SEC_HEADERS = {
     "X-Content-Type-Options": "nosniff",
@@ -55,6 +59,9 @@ class Request:
         self.query = {k: v[0] for k, v in parse_qs(u.query).items()}
         self.params = params
         self.ip = h.client_address[0]
+        if ON_VERCEL:  # Vercel 프록시 뒤: 첫 번째 X-Forwarded-For 가 실제 접속 IP
+            fwd = (h.headers.get("X-Forwarded-For") or h.headers.get("X-Real-IP") or "").split(",")[0].strip()
+            self.ip = fwd or self.ip
         self.session = None
         self.user = None  # users 또는 admins 행
         self._json = None
@@ -117,10 +124,11 @@ class App:
         return m.value if m else None
 
     def set_cookie(self, token: str | None) -> dict:
+        sec = "; Secure" if SECURE_COOKIES else ""
         if token:
-            v = f"{self.cookie}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={S.SESSION_TTL}"
+            v = f"{self.cookie}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={S.SESSION_TTL}{sec}"
         else:
-            v = f"{self.cookie}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
+            v = f"{self.cookie}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{sec}"
         return {"Set-Cookie": v}
 
     def handler(self):

@@ -65,24 +65,34 @@ def csrf_ok(session, header_value: str | None) -> bool:
 
 
 class Throttle:
-    """IP+계정별 로그인 실패 제한: 10분 안에 5번 실패하면 10분 잠금."""
+    """IP+계정별 로그인 실패 제한: 10분 안에 5번 실패하면 10분 잠금.
+    db 를 주면 login_fails 표에 기록한다 (서버리스는 인스턴스가 여러 개라 메모리로는 막을 수 없다)."""
 
-    def __init__(self, limit=5, window=600):
-        self.limit, self.window = limit, window
+    def __init__(self, limit=5, window=600, db=None):
+        self.limit, self.window, self.db = limit, window, db
         self.fails: dict[str, list[float]] = {}
         self.lock = threading.Lock()
 
     def blocked(self, key: str) -> bool:
+        now = time.time()
+        if self.db is not None:
+            self.db.exec("DELETE FROM login_fails WHERE at < ?", (now - self.window,))
+            return (self.db.val("SELECT COUNT(*) FROM login_fails WHERE key=?", (key,)) or 0) >= self.limit
         with self.lock:
-            now = time.time()
             xs = [t for t in self.fails.get(key, []) if now - t < self.window]
             self.fails[key] = xs
             return len(xs) >= self.limit
 
     def fail(self, key: str):
+        if self.db is not None:
+            self.db.exec("INSERT INTO login_fails (key, at) VALUES (?,?)", (key, time.time()))
+            return
         with self.lock:
             self.fails.setdefault(key, []).append(time.time())
 
     def clear(self, key: str):
+        if self.db is not None:
+            self.db.exec("DELETE FROM login_fails WHERE key=?", (key,))
+            return
         with self.lock:
             self.fails.pop(key, None)

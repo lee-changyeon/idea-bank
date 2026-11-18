@@ -1,0 +1,19 @@
+# 사용자 웹(web/) 함수 묶음에 필요 없는 것 — 관리자 사이트는 로컬 전용
+/server.py
+/static
+/admin
+/meeting
+/docs
+/brand
+/tests
+/tools
+/ideas
+/exports
+/data
+/web/data
+/web/seed.py
+/web/seed_accounts.example.json
+/web/manage_admins.py
+*.bat
+*.PNG
+*.png

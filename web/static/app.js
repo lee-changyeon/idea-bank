@@ -5,6 +5,8 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const main = $("#main");
 let ME = null;
+let LIMITS = { max_file: 20 * 1048576, max_total: 200 * 1048576 }; // 서버가 /api/me 로 알려 준다 (온라인은 더 작음)
+const mb = (n) => `${Math.round(n / 1048576)}MB`;
 
 const LEVELS = {
   private: ["비공개", "나만 봅니다. 목록에도 나오지 않습니다."],
@@ -144,7 +146,7 @@ async function viewNew(q) {
         <span class="hint">"무엇을, 왜, 어떻게"가 드러나게 적으면 나중에 증거로 쓰기 좋습니다.</span></div>
       <div class="field"><label for="tg">태그</label><input id="tg" name="tags" type="text" value="${parent ? parent.tags.join(", ") : ""}" placeholder="쉼표로 구분: 생활용품, 자전거"></div>
       <div class="field"><span class="lbl">첨부파일</span>
-        <label class="drop" id="drop" for="fi">파일을 끌어다 놓거나 눌러서 고르세요 (파일당 20MB)</label>
+        <label class="drop" id="drop" for="fi">파일을 끌어다 놓거나 눌러서 고르세요 (파일당 ${mb(LIMITS.max_file)}${LIMITS.max_total < 50 * 1048576 ? `, 합계 ${mb(LIMITS.max_total)}` : ""})</label>
         <input id="fi" type="file" multiple hidden>
         <ul class="files" id="fl"></ul></div>
     </div>
@@ -168,7 +170,15 @@ async function viewNew(q) {
     $("#fl").innerHTML = files.map((f, i) => `<li><span>${esc(f.name)}</span><small class="muted">${fmtSize(f.size)}</small><button type="button" class="x" data-i="${i}" aria-label="빼기">✕</button></li>`).join("");
     $$("#fl .x").forEach((b) => (b.onclick = () => { files.splice(+b.dataset.i, 1); drawFiles(); }));
   };
-  const add = (list) => { for (const f of list) { if (f.size > 20 * 1048576) toast(`${f.name}: 20MB를 넘습니다`, true); else files.push(f); } drawFiles(); };
+  const add = (list) => {
+    for (const f of list) {
+      const total = files.reduce((n, x) => n + x.size, 0);
+      if (f.size > LIMITS.max_file) toast(`${f.name}: ${mb(LIMITS.max_file)}를 넘습니다`, true);
+      else if (total + f.size > LIMITS.max_total) toast(`첨부 합계가 ${mb(LIMITS.max_total)}를 넘습니다`, true);
+      else files.push(f);
+    }
+    drawFiles();
+  };
   $("#fi").onchange = (e) => { add(e.target.files); e.target.value = ""; };
   const drop = $("#drop");
   drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
@@ -540,7 +550,18 @@ async function viewVerify() {
       <form class="search" id="hs"><input type="text" name="h" placeholder="고유 지문 64자리" aria-label="고유 지문" class="mono"><button class="btn">찾기</button></form>
       <div id="hr"></div></section>
   </div>
-  ${led ? html`<br><div class="note small"><b>공개 원장 헤드</b> — 기록 ${led.count}건 · 마지막 고리값 <span class="mono">${led.head}</span><p>이 값을 정기적으로 공개해 두면, 운영자도 과거 기록을 몰래 바꿀 수 없습니다.</p></div>` : ""}`);
+  ${led ? html`<br><div class="note small"><b>공개 원장 헤드</b> — 기록 ${led.count}건 · 마지막 고리값 <span class="mono">${led.head}</span><p>이 값을 정기적으로 공개해 두면, 운영자도 과거 기록을 몰래 바꿀 수 없습니다.</p>
+    <p><button class="btn sm" id="chk">원장 무결성 검사</button></p><div id="chkr"></div></div>` : ""}`);
+  const chk = $("#chk");
+  if (chk) chk.onclick = async () => {
+    $("#chkr").innerHTML = '<p class="small"><span class="spin"></span> 원장 전체를 다시 계산하는 중</p>';
+    try {
+      const r = await api("GET", "/api/ledger/verify");
+      $("#chkr").innerHTML = String(html`<div class="note ${r.ok ? "ok" : "bad"}"><b>${r.ok ? `이상 없음 — 기록 ${r.count}건의 순번·고유 지문·고리값·공인 시각·첨부가 모두 맞습니다` : `문제 ${r.broken.length}건`}</b>
+        ${r.pending ? html`<p>공인 시각 대기 ${r.pending}건</p>` : ""}
+        ${r.broken.map((b) => html`<p>#${b.seq}: ${b.reason}</p>`)}<p class="mono">${r.head}</p></div>`);
+    } catch (err) { $("#chkr").innerHTML = String(html`<p class="err">${err.message}</p>`); }
+  };
   $("#zf").onchange = async (e) => {
     const f = e.target.files[0]; if (!f) return;
     $("#zr").innerHTML = '<p class="small"><span class="spin"></span> 검사 중</p>';
@@ -593,6 +614,6 @@ async function route() {
 // m[1] 이 있으면 fn(id, q), 없으면 fn(q)
 window.addEventListener("hashchange", route);
 (async () => {
-  try { const r = await api("GET", "/api/me"); ME = r.user; } catch (_) {}
+  try { const r = await api("GET", "/api/me"); ME = r.user; if (r.limits) LIMITS = r.limits; } catch (_) {}
   route();
 })();

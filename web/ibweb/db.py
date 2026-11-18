@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -155,6 +157,12 @@ CREATE TABLE IF NOT EXISTS settlements (
   created_by  INTEGER NOT NULL,
   created_at  TEXT NOT NULL
 );
+-- 로그인 실패 기록 (서버리스에서는 인스턴스가 여러 개라 메모리 대신 DB 에 둔다)
+CREATE TABLE IF NOT EXISTS login_fails (
+  key TEXT NOT NULL,
+  at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_lf_key ON login_fails(key);
 -- 관리자 감사 로그. 자체 해시 체인을 가진다.
 CREATE TABLE IF NOT EXISTS audit (
   id         INTEGER PRIMARY KEY,
@@ -170,10 +178,24 @@ CREATE TABLE IF NOT EXISTS audit (
 );
 """
 
-DATA_DIR = WEB_DIR / "data"
+DATA_DIR = Path(os.environ.get("IB_DATA_DIR") or WEB_DIR / "data")  # 테스트는 임시 폴더를 쓴다
+
+
+def database_url() -> str:
+    return os.environ.get("DATABASE_URL", "").strip()
+
+
+def open_db():
+    """DATABASE_URL 이 postgres 주소면 Postgres(Supabase), 아니면 로컬 SQLite."""
+    url = database_url()
+    if url.startswith(("postgres://", "postgresql://")):
+        return PgDB(url)
+    return DB()
 
 
 class DB:
+    kind = "sqlite"
+
     def __init__(self, path: Path | None = None):
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         (DATA_DIR / "files").mkdir(exist_ok=True)
@@ -215,6 +237,142 @@ class DB:
                 raise
             else:
                 self.conn.execute("COMMIT")
+
+
+# ───────────────────────────── Postgres (Supabase) ─────────────────────────────
+# 서비스 코드는 SQLite 문법(? 자리표시자)으로 쓰고, 여기서 Postgres 문법으로 바꾼다. 자세한 설명: web/DEPLOY_SUPABASE.md
+
+LEDGER_LOCK = 7243100  # pg_advisory_xact_lock 키: 모든 쓰기 트랜잭션을 한 줄로 세운다 (= SQLite BEGIN IMMEDIATE)
+ID_TABLES = {"users", "admins", "ndas", "views", "loans", "contracts", "settlements"}  # id 자동 번호 표
+_INSERT = re.compile(r"^\s*INSERT\s+INTO\s+(\w+)", re.I)
+_LIKE = re.compile(r"(?<![A-Za-z])LIKE(?![A-Za-z])")
+
+
+def pg_sql(sql: str) -> str:
+    """SQLite 문법 → Postgres 문법. 쿼리 안의 리터럴 % 는 쓰지 않는다(값은 모두 자리표시자로 넘긴다)."""
+    sql = sql.replace("%", "%%").replace("?", "%s")
+    return _LIKE.sub("ILIKE", sql)
+
+
+class PgRow(dict):
+    """sqlite3.Row 처럼 r["열"] 과 r[0] 둘 다 된다."""
+    __slots__ = ("_vals",)
+
+    def __init__(self, cols, vals):
+        super().__init__(zip(cols, vals))
+        self._vals = vals
+
+    def __getitem__(self, k):
+        if isinstance(k, int):
+            return self._vals[k]
+        return dict.__getitem__(self, k)
+
+
+class PgCursor:
+    def __init__(self, cur, lastrowid=None):
+        self._cur = cur
+        self.lastrowid = lastrowid
+        self.rowcount = cur.rowcount
+
+    def _wrap(self, r):
+        if r is None:
+            return None
+        cols = [d.name for d in self._cur.description]
+        return PgRow(cols, tuple(bytes(v) if isinstance(v, memoryview) else v for v in r))
+
+    def fetchone(self):
+        return self._wrap(self._cur.fetchone()) if self._cur.description else None
+
+    def fetchall(self):
+        return [self._wrap(r) for r in self._cur.fetchall()] if self._cur.description else []
+
+
+class PgConn:
+    """tx() 안에서 넘겨주는 연결. sqlite3 연결처럼 .execute(sql, args) 를 쓴다."""
+
+    def __init__(self, raw):
+        self.raw = raw
+
+    def execute(self, sql: str, args=()):
+        m = _INSERT.match(sql)
+        want_id = bool(m and m.group(1).lower() in ID_TABLES and "RETURNING" not in sql.upper())
+        q = pg_sql(sql) + (" RETURNING id" if want_id else "")
+        cur = self.raw.cursor()
+        cur.execute(q, tuple(args))
+        if want_id:
+            return PgCursor(cur, cur.fetchone()[0])
+        return PgCursor(cur)
+
+
+class PgDB:
+    kind = "postgres"
+
+    def __init__(self, url: str):
+        self.url = url
+        self.lock = threading.RLock()
+        self._raw = None
+        with self.lock:
+            self._ensure_schema()
+
+    # 연결: 인스턴스마다 1개를 재사용, 끊기면 다시 연결 (Supabase 트랜잭션 풀러 → prepare 끔)
+    def _connect(self):
+        import psycopg  # Postgres 모드에서만 필요 (requirements.txt)
+        self._raw = psycopg.connect(self.url, autocommit=True, prepare_threshold=None, connect_timeout=10)
+        return self._raw
+
+    @property
+    def raw(self):
+        if self._raw is None or self._raw.closed:
+            return self._connect()
+        return self._raw
+
+    def _run(self, fn):
+        try:
+            return fn(PgConn(self.raw))
+        except Exception as ex:
+            import psycopg
+            if isinstance(ex, psycopg.OperationalError) and self._raw is not None and self._raw.closed:
+                return fn(PgConn(self._connect()))  # 한 번만 다시 연결해서 재시도
+            raise
+
+    def _ensure_schema(self):
+        if self._run(lambda c: c.execute("SELECT to_regclass('public.login_fails')").fetchone()[0]):
+            return
+        sql = (Path(__file__).with_name("schema_pg.sql")).read_text(encoding="utf-8")
+        with self.raw.transaction():
+            self.raw.execute("SELECT pg_advisory_xact_lock(%s)", (LEDGER_LOCK,))
+            self.raw.execute(sql)
+
+    @property
+    def conn(self):  # ideabank.bundle.verify 등 .execute 만 쓰는 곳을 위한 어댑터
+        return PgConn(self.raw)
+
+    def q(self, sql: str, args=()) -> list:
+        with self.lock:
+            return self._run(lambda c: c.execute(sql, args).fetchall())
+
+    def one(self, sql: str, args=()):
+        with self.lock:
+            return self._run(lambda c: c.execute(sql, args).fetchone())
+
+    def val(self, sql: str, args=()):
+        r = self.one(sql, args)
+        return r[0] if r else None
+
+    def exec(self, sql: str, args=()):
+        with self.lock:
+            return self._run(lambda c: c.execute(sql, args))
+
+    @contextmanager
+    def tx(self):
+        """쓰기 트랜잭션. 원장 순번이 꼬이지 않도록 전역 advisory lock 으로 모든 쓰기를 직렬화한다."""
+        with self.lock:
+            raw = self.raw
+            if raw.closed:
+                raw = self._connect()
+            with raw.transaction():
+                raw.execute("SELECT pg_advisory_xact_lock(%s)", (LEDGER_LOCK,))
+                yield PgConn(raw)
 
 
 def row(r) -> dict | None:

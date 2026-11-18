@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 from ideabank import bundle as core_bundle
 
-from .db import DATA_DIR
+from . import files as F
 
 
 def make(db, idea: dict) -> tuple[str, bytes]:
@@ -33,7 +33,7 @@ def make(db, idea: dict) -> tuple[str, bytes]:
             while name in used:
                 name = "_" + name
             used.add(name)
-            z.writestr(f"attachments/{name}", (DATA_DIR / "files" / a["sha256"]).read_bytes())
+            z.writestr(f"attachments/{name}", F.get(a["sha256"]))
         if ev["tsa_token"]:
             z.writestr("token.tsr", bytes(ev["tsa_token"]))
         z.writestr("ledger.json", json.dumps({
@@ -46,7 +46,7 @@ def make(db, idea: dict) -> tuple[str, bytes]:
 
 def verify(db, data: bytes) -> dict:
     """v1 bundle.verify 를 그대로 사용. Store 대신 .db 속성만 가진 어댑터를 넘긴다."""
-    with db.lock:
+    with db.lock:  # SQLite 연결 또는 Postgres 어댑터 (둘 다 .execute(sql, args).fetchone())
         out = core_bundle.verify(SimpleNamespace(db=db.conn), data)
     for c in out["checks"]:
         if c["name"] == "이 보관함 원장":

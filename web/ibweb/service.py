@@ -7,19 +7,24 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 from datetime import datetime, timedelta, timezone
 
 from ideabank import canonical as C
 
+from . import files as F
 from . import ledger as L
 from . import nda as N
 from . import security as S
-from .db import DATA_DIR, row
+from .db import row
 from .httpkit import bad, forbidden, notfound
 
 KST = timezone(timedelta(hours=9))
 MAX_FILE = 20 * 1024 * 1024
+# Vercel 함수는 요청 본문이 4.5MB 까지라, 온라인에서는 한 번에 올리는 첨부 합계를 줄인다 (base64 로 약 4/3 배가 됨)
+MAX_TOTAL = 3 * 1024 * 1024 if os.environ.get("VERCEL") else 200 * 1024 * 1024
+LIMITS = {"max_file": min(MAX_FILE, MAX_TOTAL), "max_total": MAX_TOTAL}
 EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 DISCLOSURE = {"private": "비공개", "summary": "요약 공개", "nda": "NDA 후 전문 공개"}
 PAY_KINDS = {"upfront": "계약금", "royalty": "매출 로열티", "profit": "이익 배당", "equity": "지분"}
@@ -118,17 +123,19 @@ def create_idea(db, stamper, user, *, title, body, tags, attachments, parent_seq
             raise notfound("개정할 원본 아이디어를 찾을 수 없습니다.")
 
     files = []
+    total = 0
     for a in attachments or []:
         try:
             data = base64.b64decode(a.get("data_b64") or "", validate=True)
         except Exception:
             raise bad("첨부파일을 읽을 수 없습니다.")
-        if len(data) > MAX_FILE:
-            raise bad(f"첨부 '{a.get('name')}' 가 20MB 를 넘습니다.")
+        if len(data) > LIMITS["max_file"]:
+            raise bad(f"첨부 '{a.get('name')}' 가 {LIMITS['max_file'] // 1048576}MB 를 넘습니다.")
+        total += len(data)
+        if total > MAX_TOTAL:
+            raise bad(f"첨부파일 합계가 {MAX_TOTAL // 1048576}MB 를 넘습니다.")
         sha = C.sha256_hex(data)
-        p = DATA_DIR / "files" / sha
-        if not p.exists():
-            p.write_bytes(data)
+        F.put(sha, data)
         files.append({"name": safe_name(a.get("name") or "file"), "sha256": sha, "size": len(data),
                       "mime": (a.get("mime") or "application/octet-stream")[:100]})
 
@@ -233,7 +240,7 @@ def attachment(db, seq, sha) -> tuple[dict, bytes]:
     a = db.one("SELECT * FROM attachments WHERE idea_seq=? AND sha256=?", (int(seq), sha))
     if not a:
         raise notfound("첨부파일을 찾을 수 없습니다.")
-    return dict(a), (DATA_DIR / "files" / a["sha256"]).read_bytes()
+    return dict(a), F.get(a["sha256"])
 
 
 def views_for_ideas(db, seqs: list[int]) -> list[dict]:
@@ -627,9 +634,7 @@ def create_contract(db, stamper, admin, f, ip) -> dict:
         data = base64.b64decode(f["doc_b64"])
         doc_hash = C.sha256_hex(data)
         doc_name = safe_name(f.get("doc_name") or "contract")
-        p = DATA_DIR / "files" / doc_hash
-        if not p.exists():
-            p.write_bytes(data)
+        F.put(doc_hash, data)
     terms = json.loads(x["terms"])
     terms["note"] = C.text(f.get("note") or "").strip()[:4000]
     with db.tx() as conn:
