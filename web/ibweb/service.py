@@ -64,8 +64,13 @@ def signup(db, email, password, name, role, org) -> dict:
         raise bad("사업자는 회사(기관) 이름을 적어 주세요.")
     if db.one("SELECT 1 FROM users WHERE email=?", (email,)):
         raise bad("이미 가입된 이메일입니다.")
-    cur = db.exec("INSERT INTO users (email, name, role, org, pw, created_at) VALUES (?,?,?,?,?,?)",
-                  (email, name, role, org, S.hash_password(password), C.now_iso()))
+    try:
+        cur = db.exec("INSERT INTO users (email, name, role, org, pw, created_at) VALUES (?,?,?,?,?,?)",
+                      (email, name, role, org, S.hash_password(password), C.now_iso()))
+    except Exception as ex:  # 동시에 같은 이메일로 가입 (sqlite3.IntegrityError / psycopg UniqueViolation)
+        if any(c.__name__ in ("IntegrityError", "UniqueViolation") for c in type(ex).__mro__):
+            raise bad("이미 가입된 이메일입니다.")
+        raise
     return row(db.one("SELECT * FROM users WHERE id=?", (cur.lastrowid,)))
 
 
@@ -303,7 +308,15 @@ def summary_view(db, r, user) -> dict:
             "attachment_count": db.val("SELECT COUNT(*) FROM attachments WHERE idea_seq=?", (r["seq"],))}
 
 
+VIEW_DEDUP_MINUTES = 10
+
+
 def _log_view(db, stamper, user, idea_row, level, detail="", nda_hash=None):
+    if level in ("full", "file"):
+        since = (datetime.now(timezone.utc) - timedelta(minutes=VIEW_DEDUP_MINUTES)).strftime("%Y-%m-%dT%H:%M:%S")
+        if db.one("SELECT 1 FROM views WHERE idea_seq=? AND user_id=? AND level=? AND detail=? AND at >= ?",
+                  (idea_row["seq"], user["id"], level, detail, since)):
+            return  # 방금 같은 열람을 기록했음
     with db.tx() as conn:
         ev = L.append(conn, f"view.{level}", L.event_payload(
             f"view.{level}", idea=idea_row["content_hash"], idea_no=idea_row["idea_no"],
@@ -662,7 +675,7 @@ def add_settlement(db, stamper, admin, contract_id, f, ip) -> dict:
         raise bad("정산 기간을 적어 주세요. 예) 2027-1Q")
     if kind not in PAY_KINDS:
         raise bad("정산 종류를 골라 주세요.")
-    amount = _num(f.get("amount"), "금액", 0)
+    amount = _num(f.get("amount"), "금액", 0, 10 ** 15)
     paid_on = (f.get("paid_on") or "").strip()
     note = C.text(f.get("note") or "").strip()[:2000]
     with db.tx() as conn:

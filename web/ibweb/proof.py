@@ -44,8 +44,32 @@ def make(db, idea: dict) -> tuple[str, bytes]:
     return f"{d['idea_no']}-증명.zip", buf.getvalue()
 
 
+ZIP_MAX_ENTRIES = 200
+ZIP_MAX_ENTRY = 25 * 1024 * 1024
+ZIP_MAX_TOTAL = 60 * 1024 * 1024
+
+
+def check_zip(data: bytes):
+    """압축을 풀기 전에 항목 수와 풀린 크기를 확인한다 (압축 폭탄으로 메모리를 다 쓰지 않도록)."""
+    try:
+        infos = zipfile.ZipFile(io.BytesIO(data)).infolist()
+    except zipfile.BadZipFile:
+        raise ValueError("zip 파일이 아닙니다.")
+    if len(infos) > ZIP_MAX_ENTRIES:
+        raise ValueError("증명 파일 안의 항목이 너무 많습니다.")
+    if any(i.file_size > ZIP_MAX_ENTRY for i in infos) or sum(i.file_size for i in infos) > ZIP_MAX_TOTAL:
+        raise ValueError("증명 파일을 풀면 너무 큽니다.")
+    try:
+        canon = json.loads(zipfile.ZipFile(io.BytesIO(data)).read("canonical.json"))
+        if len(canon.get("attachments") or []) > ZIP_MAX_ENTRIES:
+            raise ValueError("첨부 목록이 너무 깁니다.")
+    except (KeyError, ValueError, AttributeError):
+        pass  # canonical.json 이 없거나 깨진 경우는 core 검증기가 알려 준다
+
+
 def verify(db, data: bytes) -> dict:
     """v1 bundle.verify 를 그대로 사용. Store 대신 .db 속성만 가진 어댑터를 넘긴다."""
+    check_zip(data)
     with db.lock:  # SQLite 연결 또는 Postgres 어댑터 (둘 다 .execute(sql, args).fetchone())
         out = core_bundle.verify(SimpleNamespace(db=db.conn), data)
     for c in out["checks"]:

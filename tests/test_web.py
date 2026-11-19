@@ -55,6 +55,23 @@ class WebFlowTest(unittest.TestCase):
                 os.environ[k] = v
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
+    def test_zip_bomb_rejected(self):
+        import base64, io, zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("canonical.json", b"{}")
+            z.writestr("attachments/big.bin", bytes(30 * 1024 * 1024))  # 풀면 30MB, 압축하면 수십 KB
+        with self.assertRaises(ValueError):
+            self.mod.proof.check_zip(buf.getvalue())
+        c = self.smoke.Client(f"http://127.0.0.1:{self.srv.server_address[1]}")
+        c.call("POST", "/api/verify/bundle", {"zip_b64": base64.b64encode(buf.getvalue()).decode()}, expect=400)
+
+    def test_decimal_json(self):
+        from decimal import Decimal
+        from ibweb.httpkit import _json_default
+        self.assertEqual(_json_default(Decimal("12")), 12)
+        self.assertEqual(_json_default(Decimal("1.5")), 1.5)
+
     def test_full_flow(self):
         out = self.smoke.run(f"http://127.0.0.1:{self.srv.server_address[1]}", expect_tsa=False)
         self.assertTrue(out["ledger"]["ok"])

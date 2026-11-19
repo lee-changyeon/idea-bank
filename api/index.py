@@ -36,7 +36,9 @@ ADMIN_HOSTS = {h.strip().lower() for h in os.environ.get("IB_ADMIN_HOSTS", "idea
                if h.strip()}
 
 
-def pick_app(host: str):
+def pick_app(host: str, path: str = ""):
+    if path.startswith("/api/cron/"):  # Vercel Cron 은 운영 주소로 부른다 — 주소와 관계없이 사용자 앱이 처리
+        return _web.app
     return _admin.app if (host or "").split(":")[0].strip().lower() in ADMIN_HOSTS else _web.app
 
 
@@ -44,5 +46,5 @@ class handler(Handler):  # Vercel 이 부르는 이름. web/ibweb/httpkit.Handle
     app = _web.app
 
     def _dispatch(self, method):
-        self.app = pick_app(self.headers.get("Host"))
+        self.app = pick_app(self.headers.get("Host"), self.path)
         return super()._dispatch(method)

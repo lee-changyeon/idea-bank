@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+from decimal import Decimal
 import os
 import re
 import traceback
@@ -26,6 +27,12 @@ SEC_HEADERS = {
                                "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
     "Cross-Origin-Opener-Policy": "same-origin",
 }
+
+
+def _json_default(o):
+    if isinstance(o, Decimal):  # Postgres SUM(bigint) 등은 numeric → Decimal 로 온다
+        return int(o) if o == o.to_integral_value() else float(o)
+    raise TypeError(f"JSON 으로 바꿀 수 없는 값: {type(o).__name__}")
 
 
 class HttpError(Exception):
@@ -59,9 +66,10 @@ class Request:
         self.query = {k: v[0] for k, v in parse_qs(u.query).items()}
         self.params = params
         self.ip = h.client_address[0]
-        if ON_VERCEL:  # Vercel 프록시 뒤: 첫 번째 X-Forwarded-For 가 실제 접속 IP
-            fwd = (h.headers.get("X-Forwarded-For") or h.headers.get("X-Real-IP") or "").split(",")[0].strip()
-            self.ip = fwd or self.ip
+        if ON_VERCEL:  # Vercel 프록시 뒤: Vercel 이 넣는 X-Real-IP 가 실제 접속 IP
+            real = (h.headers.get("X-Real-IP") or "").strip()
+            fwd = (h.headers.get("X-Forwarded-For") or "").split(",")[-1].strip()  # 마지막 값 = 프록시가 본 IP
+            self.ip = real or fwd or self.ip
         self.session = None
         self.user = None  # users 또는 admins 행
         self._json = None
@@ -172,7 +180,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _json(self, status: int, obj, headers=None):
-        self._send(status, json.dumps(obj, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", headers)
+        self._send(status, json.dumps(obj, ensure_ascii=False, default=_json_default).encode("utf-8"),
+                   "application/json; charset=utf-8", headers)
 
     def _same_origin(self) -> bool:
         origin = self.headers.get("Origin")

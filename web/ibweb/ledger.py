@@ -19,6 +19,7 @@ from . import files as F
 from .db import DB
 
 EVENT_SCHEMA = "ideabank-event/1"
+INLINE_STAMP_BUDGET = 12.0  # 서버리스: 요청 안에서 이벤트 1건의 공인 시각에 쓰는 최대 시간(초)
 MAX_TRIES = 8
 
 KIND_LABEL = {
@@ -62,7 +63,7 @@ class InlineWake:
     """서버리스(Vercel)용: 요청이 끝나면 스레드가 살아 있지 않으므로, wake.set() 때 대기 이벤트를 짧게 바로 처리한다.
     놓친 것은 Vercel Cron 이 GET /api/cron/tsa 로 다시 시도한다."""
 
-    def __init__(self, stamper: "Stamper", limit=4, budget=6.0):
+    def __init__(self, stamper: "Stamper", limit=2, budget=6.0):
         self.stamper, self.limit, self.budget = stamper, limit, budget
 
     def set(self):
@@ -81,17 +82,36 @@ class Stamper:
     def __init__(self, db: DB, urls: list[str], inline: bool = False):
         self.db = db
         self.urls = urls
+        self.inline = inline
         self.wake = InlineWake(self) if inline else threading.Event()
         self._lock = threading.Lock()
 
-    def stamp(self, seq: int) -> dict:
+    def _stamp_urls(self, digest_hex: str, deadline: float | None) -> dict:
+        """tsa.stamp_any 와 같지만, deadline 이 있으면 남은 시간만큼만 기다리고 시간이 없으면 멈춘다."""
+        errors = []
+        for url in self.urls:
+            timeout = 15.0
+            if deadline is not None:
+                timeout = min(timeout, deadline - time.monotonic())
+                if timeout < 1.0:
+                    errors.append(f"{url}: 시간 부족으로 건너뜀")
+                    break
+            try:
+                return tsa.stamp(digest_hex, url, timeout=timeout)
+            except Exception as ex:  # 다음 TSA 로
+                errors.append(f"{url}: {ex}")
+        raise RuntimeError("모든 TSA 요청 실패 — " + " | ".join(errors))
+
+    def stamp(self, seq: int, deadline: float | None = None) -> dict:
         r = self.db.one("SELECT content_hash, tsa_token FROM events WHERE seq=?", (seq,))
         if not r:
             raise KeyError(seq)
         if r["tsa_token"]:
             return {"ok": True, "already": True}
+        if deadline is None and self.inline:
+            deadline = time.monotonic() + INLINE_STAMP_BUDGET
         try:
-            out = tsa.stamp_any(r["content_hash"], self.urls)
+            out = self._stamp_urls(r["content_hash"], deadline)
         except Exception as ex:
             self.db.exec("UPDATE events SET tsa_error=?, tsa_tries=tsa_tries+1 WHERE seq=?", (str(ex)[:500], seq))
             return {"ok": False, "error": str(ex)}
@@ -110,7 +130,7 @@ class Stamper:
             for seq in self.pending(limit, max_tries):
                 if deadline is not None and time.monotonic() > deadline:
                     break
-                if self.stamp(seq)["ok"]:
+                if self.stamp(seq, deadline)["ok"]:
                     done += 1
                 else:
                     fail += 1

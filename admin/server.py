@@ -26,6 +26,8 @@ stamper = L.Stamper(db, CFG["tsa_urls"], inline=ON_VERCEL)
 # 관리자 정적 파일 먼저, 공용 CSS·로고는 web/static 에서
 app = App("아이디어뱅크 관리자", db, "admin", "ib_admin", [HERE / "static", HERE.parent / "web" / "static"])
 throttle = S.Throttle(db=db)
+acct_limit = S.Throttle(limit=10, window=600, db=db)      # 한 계정에 10분 동안 10번 실패하면 잠금 (IP 무관)
+token_limit = S.Throttle(limit=10, window=3600, db=db)    # 설정 토큰 틀림: 전체 1시간 10번까지
 USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
 
 
@@ -74,12 +76,13 @@ def r_setup_state(req):
 
 def _check_token(req, key: str):
     token = _setup_token()
-    if throttle.blocked(key):
-        raise HttpError(429, "시도가 많아 10분 동안 잠겼습니다.")
+    if throttle.blocked(key) or token_limit.blocked("token|all"):
+        raise HttpError(429, "시도가 많아 잠시 잠겼습니다. 나중에 다시 시도해 주세요.")
     if not token:
         raise forbidden("이 기능은 꺼져 있습니다. 운영자가 Vercel 에 ADMIN_SETUP_TOKEN 을 넣어야 합니다.")
     if not hmac.compare_digest(str(req.get("token")), token):
         throttle.fail(key)
+        token_limit.fail("token|all")  # IP 를 바꿔 가며 맞혀 보는 것도 막는다
         raise forbidden("설정 토큰이 맞지 않습니다.")
     throttle.clear(key)
 
@@ -128,17 +131,20 @@ def r_setup(req):
 
 @app.route("POST", "/api/login")
 def r_login(req):
-    username = str(req.get("username")).strip()
-    key = f"{req.ip}|{username}"
-    if throttle.blocked(key):
-        raise HttpError(429, "로그인 실패가 많아 10분 동안 잠겼습니다.")
+    username = str(req.get("username")).strip()[:32]
+    key, acct = f"{req.ip}|{username}", f"acct|{username}"
+    if throttle.blocked(key) or acct_limit.blocked(acct):
+        raise HttpError(429, "로그인 실패가 많아 잠시 잠겼습니다. 10분 뒤 다시 시도해 주세요.")
     pw = str(req.get("password"))
     a = svc.authenticate(db, "admins", "username", username, pw)
     if not a:
         throttle.fail(key)
-        svc.audit(db, None, "관리자 로그인 실패", username, {}, req.ip)
+        acct_limit.fail(acct)  # IP 를 바꿔 가며 시도해도 계정 단위로 잠긴다
+        if db.one("SELECT 1 FROM admins WHERE username=?", (username,)):  # 없는 아이디는 기록하지 않음(로그 부풀림 방지)
+            svc.audit(db, None, "관리자 로그인 실패", username, {}, req.ip)
         raise HttpError(401, "아이디 또는 비밀번호가 맞지 않습니다.")
     throttle.clear(key)
+    acct_limit.clear(acct)
     weak = 0 if S.admin_pw_strong(pw) else 1  # 원문은 로그인할 때만 알 수 있으므로 여기서 강도를 다시 기록
     if weak != a["pw_weak"]:
         db.exec("UPDATE admins SET pw_weak=? WHERE id=?", (weak, a["id"]))
@@ -199,7 +205,7 @@ def r_dash(req):
                   "approved": c("SELECT COUNT(*) FROM loans WHERE status='approved'"),
                   "rejected": c("SELECT COUNT(*) FROM loans WHERE status='rejected'")},
         "contracts": c("SELECT COUNT(*) FROM contracts"),
-        "settled_total": c("SELECT COALESCE(SUM(amount),0) FROM settlements"),
+        "settled_total": c("SELECT CAST(COALESCE(SUM(amount),0) AS BIGINT) FROM settlements"),
         "ledger": svc.ledger_status(db),
         "pending_events": [L.event_public(e) for e in db.q(
             "SELECT * FROM events WHERE tsa_token IS NULL ORDER BY seq LIMIT 20")],

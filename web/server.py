@@ -24,6 +24,9 @@ db = open_db()  # DATABASE_URL 이 있으면 Postgres(Supabase), 없으면 web/d
 stamper = L.Stamper(db, CFG["tsa_urls"], inline=ON_VERCEL)
 app = App("아이디어뱅크 웹", db, "user", "ib_sess", [HERE / "static"])
 throttle = S.Throttle(db=db)
+signup_limit = S.Throttle(limit=10, window=3600, db=db)   # 같은 IP 에서 1시간에 가입 10번까지
+verify_limit = S.Throttle(limit=20, window=600, db=db)    # 공개 원장 검사: 같은 IP 에서 10분에 20번까지
+_verify_cache: dict = {}                                  # 원장 헤드가 같으면 5분 동안 결과 재사용
 
 
 def me(req):
@@ -39,6 +42,10 @@ def r_me(req):
 
 @app.route("POST", "/api/signup")
 def r_signup(req):
+    key = f"signup|{req.ip}"
+    if signup_limit.blocked(key):
+        raise HttpError(429, "가입 요청이 너무 많습니다. 잠시 뒤 다시 시도해 주세요.")
+    signup_limit.fail(key)  # 성공·실패와 관계없이 횟수를 센다
     u = svc.signup(db, req.get("email"), req.get("password"), req.get("name"), req.get("role"), req.get("org"))
     token, csrf = S.new_session(db, "user", u["id"])
     return {"user": svc.public_user(u), "csrf": csrf}, app.set_cookie(token)
@@ -77,8 +84,19 @@ def r_ledger(req):
 @app.route("GET", "/api/ledger/verify")
 def r_ledger_verify(req):
     """원장 무결성 검사 (누구나). 순번·고유 지문·고리값·공인 시각·첨부 해시만 검사하고 내용은 돌려주지 않는다."""
+    st = svc.ledger_status(db)
+    ck = (st["count"], st["head"], st["pending"])
+    hit = _verify_cache.get("v")
+    if hit and hit[0] == ck and time.time() - hit[1] < 300:
+        return hit[2]
+    key = f"verify|{req.ip}"
+    if verify_limit.blocked(key):
+        raise HttpError(429, "검사 요청이 너무 많습니다. 잠시 뒤 다시 시도해 주세요.")
+    verify_limit.fail(key)
     out = L.verify_chain(db)
-    return {k: out[k] for k in ("ok", "count", "head", "pending", "broken", "checked_at")}
+    res = {k: out[k] for k in ("ok", "count", "head", "pending", "broken", "checked_at")}
+    _verify_cache["v"] = (ck, time.time(), res)
+    return res
 
 
 @app.route("GET", "/api/cron/tsa")
@@ -98,6 +116,10 @@ def r_lookup(req):
 
 @app.route("POST", "/api/verify/bundle")
 def r_verify(req):
+    key = f"verifyzip|{req.ip}"
+    if verify_limit.blocked(key):
+        raise HttpError(429, "검사 요청이 너무 많습니다. 잠시 뒤 다시 시도해 주세요.")
+    verify_limit.fail(key)
     try:
         data = base64.b64decode(req.get("zip_b64"), validate=True)
     except Exception:
