@@ -5,6 +5,7 @@ vercel.json 이 모든 경로를 이 함수로 보낸다. 정적 파일(web/stat
 """
 import importlib.util
 import sys
+from http.server import BaseHTTPRequestHandler  # noqa: F401  (Vercel 파이썬 런타임 표식)
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,4 +20,8 @@ _mod = importlib.util.module_from_spec(_spec)
 sys.modules["ideabank_web_server"] = _mod
 _spec.loader.exec_module(_mod)
 
-handler = _mod.app.handler()
+_Base = _mod.app.handler()
+
+
+class handler(_Base):  # Vercel 이 부르는 이름. web/ibweb/httpkit.Handler(BaseHTTPRequestHandler) 그대로
+    pass
