@@ -6,6 +6,7 @@
   python web/manage_admins.py list
   python web/manage_admins.py add <username> <name> [--generate | --visible]
   python web/manage_admins.py passwd <username> [--generate | --visible]
+  python web/manage_admins.py reset2fa <username>     # 2단계 인증 초기화 (휴대폰 분실 등)
 
 비밀번호는 getpass 로 입력받는다. 입력한 글자는 화면에 보이지 않으니 그대로 치고 Enter 를 누른다.
 터미널에서 입력이 아예 안 되면 --visible 을 붙여 글자가 보이게 입력한다.
@@ -91,6 +92,15 @@ def cmd_passwd(db: DB, username: str, generate: bool, visible: bool = False):
         _show_generated(username, pw)
 
 
+def cmd_reset2fa(db: DB, username: str):
+    if not db.val("SELECT 1 FROM admins WHERE username=?", (username,)):
+        sys.exit(f"없는 관리자 아이디입니다: {username}")
+    db.exec("UPDATE admins SET totp_on=0, totp_secret=NULL, totp_last=0 WHERE username=?", (username,))
+    db.exec("DELETE FROM sessions WHERE kind='admin' AND subject_id=(SELECT id FROM admins WHERE username=?)", (username,))
+    svc.audit(db, None, "관리자 2단계 인증 초기화", username, {"via": "manage_admins.py"}, "cli")
+    print(f"2단계 인증을 껐습니다: {username} (다음 로그인 뒤 [보안 설정] 에서 다시 켜세요)")
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     generate = "--generate" in argv
@@ -107,6 +117,8 @@ def main(argv=None):
         cmd_add(db, args[1], args[2], generate, visible)
     elif cmd == "passwd" and len(args) == 2:
         cmd_passwd(db, args[1], generate, visible)
+    elif cmd == "reset2fa" and len(args) == 2:
+        cmd_reset2fa(db, args[1])
     else:
         print(__doc__)
         sys.exit(2)

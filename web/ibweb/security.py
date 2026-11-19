@@ -1,10 +1,13 @@
 """비밀번호 해시(scrypt), 세션, CSRF, 로그인 시도 제한."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import os
 import secrets
+import struct
+from urllib.parse import quote
 import threading
 import time
 
@@ -37,9 +40,47 @@ def admin_pw_problem(pw: str) -> str | None:
     return None if len(pw) >= PRELAUNCH_MIN else f"비밀번호는 {PRELAUNCH_MIN}자 이상으로 정해 주세요."
 
 
+# ── 관리자 2단계 인증 (TOTP, RFC 6238) — Google Authenticator·Microsoft Authenticator 등과 호환 ──
+TOTP_STEP, TOTP_DIGITS = 30, 6
+
+
+def totp_new_secret() -> str:
+    return base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
+
+
+def _hotp(secret: str, counter: int) -> str:
+    key = base64.b32decode(secret + "=" * (-len(secret) % 8), casefold=True)
+    h = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    o = h[-1] & 0x0F
+    n = (struct.unpack(">I", h[o:o + 4])[0] & 0x7FFFFFFF) % (10 ** TOTP_DIGITS)
+    return str(n).zfill(TOTP_DIGITS)
+
+
+def totp_now(secret: str, at: float | None = None) -> str:
+    return _hotp(secret, int((time.time() if at is None else at) // TOTP_STEP))
+
+
+def totp_check(secret: str, code: str, last_counter: int = 0, window: int = 1) -> int | None:
+    """맞으면 그 시각 칸(counter)을, 틀리거나 이미 쓴 코드면 None. 앞뒤 1칸(±30초)까지 허용."""
+    code = "".join(c for c in str(code or "") if c.isdigit())
+    if not secret or len(code) != TOTP_DIGITS:
+        return None
+    now = int(time.time() // TOTP_STEP)
+    for c in range(now - window, now + window + 1):
+        if c > (last_counter or 0) and hmac.compare_digest(_hotp(secret, c), code):
+            return c  # 같은 코드를 두 번 쓰지 못하도록 이 값을 저장한다
+    return None
+
+
+def totp_uri(secret: str, username: str, issuer: str = "IdeaBank Admin") -> str:
+    return (f"otpauth://totp/{quote(issuer)}:{quote(username)}?secret={secret}&issuer={quote(issuer)}"
+            f"&algorithm=SHA1&digits={TOTP_DIGITS}&period={TOTP_STEP}")
+
+
 def admin_policy() -> dict:
     on = launched()
-    return {"launched": on, "min_len": STRONG_MIN if on else PRELAUNCH_MIN, "strong_rule": STRONG_RULE}
+    return {"launched": on, "min_len": STRONG_MIN if on else PRELAUNCH_MIN, "strong_rule": STRONG_RULE,
+            "require_2fa": on}
 SESSION_TTL = 8 * 3600
 
 

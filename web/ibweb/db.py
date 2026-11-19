@@ -32,7 +32,10 @@ CREATE TABLE IF NOT EXISTS admins (
   name       TEXT NOT NULL,
   pw         TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  pw_weak    INTEGER NOT NULL DEFAULT 0  -- 강한 비밀번호 기준에 못 미치면 1 (정식 서비스 때 변경 유도)
+  pw_weak    INTEGER NOT NULL DEFAULT 0,  -- 강한 비밀번호 기준에 못 미치면 1 (정식 서비스 때 변경 유도)
+  totp_secret TEXT,                       -- 2단계 인증(TOTP) 비밀 키 (켜기 전에는 등록 중인 키)
+  totp_on    INTEGER NOT NULL DEFAULT 0,
+  totp_last  INTEGER NOT NULL DEFAULT 0   -- 마지막으로 쓴 코드의 시각 칸 (같은 코드 재사용 방지)
 );
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY,
@@ -179,6 +182,10 @@ CREATE TABLE IF NOT EXISTS audit (
 );
 """
 
+# 처음 스키마 뒤에 더한 admins 열 (기존 DB 는 시작할 때 자동으로 추가)
+ADMIN_COLS = [("pw_weak", "INTEGER NOT NULL DEFAULT 0"), ("totp_secret", "TEXT"),
+              ("totp_on", "INTEGER NOT NULL DEFAULT 0"), ("totp_last", "INTEGER NOT NULL DEFAULT 0")]
+
 DATA_DIR = Path(os.environ.get("IB_DATA_DIR") or WEB_DIR / "data")  # 테스트는 임시 폴더를 쓴다
 
 
@@ -210,8 +217,9 @@ class DB:
         with self.lock:
             self.conn.executescript(SCHEMA)
             cols = {r[1] for r in self.conn.execute("PRAGMA table_info(admins)")}
-            if "pw_weak" not in cols:  # 예전에 만든 DB
-                self.conn.execute("ALTER TABLE admins ADD COLUMN pw_weak INTEGER NOT NULL DEFAULT 0")
+            for col, ddl in ADMIN_COLS:  # 예전에 만든 DB 에 나중에 더한 열
+                if col not in cols:
+                    self.conn.execute(f"ALTER TABLE admins ADD COLUMN {col} {ddl}")
 
     def q(self, sql: str, args=()) -> list[sqlite3.Row]:
         with self.lock:
@@ -357,7 +365,8 @@ class PgDB:
                 raw.execute("SELECT pg_advisory_xact_lock(%s)", (LEDGER_LOCK,))
                 raw.execute(sql)
         # 나중에 더한 열 (이미 있으면 아무것도 안 함)
-        raw.execute("ALTER TABLE admins ADD COLUMN IF NOT EXISTS pw_weak INTEGER NOT NULL DEFAULT 0")
+        for col, ddl in ADMIN_COLS:
+            raw.execute(f"ALTER TABLE admins ADD COLUMN IF NOT EXISTS {col} {ddl}")
 
     @property
     def conn(self):  # ideabank.bundle.verify 등 .execute 만 쓰는 곳을 위한 어댑터

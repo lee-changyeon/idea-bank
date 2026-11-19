@@ -17,7 +17,10 @@ CREATE TABLE IF NOT EXISTS admins (
   name       TEXT NOT NULL,
   pw         TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  pw_weak    INTEGER NOT NULL DEFAULT 0
+  pw_weak    INTEGER NOT NULL DEFAULT 0,
+  totp_secret TEXT,
+  totp_on    INTEGER NOT NULL DEFAULT 0,
+  totp_last  INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY,

@@ -7,7 +7,8 @@ const main = $("#main");
 let ME = null;
 let POLICY = { launched: false, min_len: 4, strong_rule: "12자 이상, 영문 소문자·대문자·숫자·특수문자 중 3가지 이상" };
 let MUST = false; // 정식 서비스 중 약한 비밀번호 → 바꾸기 전에는 다른 화면을 못 씀
-const setMe = (r) => { ME = r.admin; if (r.policy) POLICY = r.policy; MUST = !!r.must_change; };
+let MUST2FA = false; // 정식 서비스 중 2단계 인증 꺼짐 → 켜기 전에는 다른 화면을 못 씀
+const setMe = (r) => { ME = r.admin; if (r.policy) POLICY = r.policy; MUST = !!r.must_change; MUST2FA = !!r.must_2fa; };
 const pwHint = () => (POLICY.launched ? POLICY.strong_rule : `${POLICY.min_len}자 이상 (정식 서비스 전 임시 기준. 권장: ${POLICY.strong_rule})`);
 const PAY = { upfront: "계약금", royalty: "매출 로열티", profit: "이익 배당", equity: "지분" };
 
@@ -20,20 +21,24 @@ const short = (h, n = 14) => (h ? h.slice(0, n) + "…" : "");
 function pwBanner() {
   let bn = $("#pwbanner");
   if (!bn) { bn = document.createElement("div"); bn.id = "pwbanner"; bn.className = "wrap"; main.before(bn); }
-  if (!ME || !ME.pw_weak) { bn.innerHTML = ""; return; }
-  bn.innerHTML = MUST
+  if (!ME || (!ME.pw_weak && ME.totp)) { bn.innerHTML = ""; return; }
+  const tfa = ME.totp ? "" : MUST2FA
+    ? String(html`<div class="note bad" role="alert"><b>정식 서비스가 시작되어 2단계 인증을 켜야 합니다.</b><p>휴대폰 인증 앱(Google Authenticator 등)을 등록하기 전에는 다른 기능을 쓸 수 없습니다. <a href="#/security">보안 설정</a></p></div>`)
+    : String(html`<div class="note amber" role="status"><b>2단계 인증이 꺼져 있습니다.</b><p>비밀번호가 새어도 안전하도록 휴대폰 인증 앱으로 2단계 인증을 켜 두세요. 정식 서비스 때는 필수입니다. <a href="#/security">지금 켜기</a></p></div>`);
+  if (!ME.pw_weak) { bn.innerHTML = tfa; return; }
+  bn.innerHTML = tfa + (MUST
     ? String(html`<div class="note bad" role="alert"><b>정식 서비스가 시작되어 비밀번호를 바꿔야 합니다.</b><p>지금 비밀번호는 보안 기준에 못 미칩니다. 새 비밀번호(${POLICY.strong_rule})로 바꾸기 전에는 다른 기능을 쓸 수 없습니다.</p></div>`)
-    : String(html`<div class="note amber" role="status"><b>임시(간단한) 비밀번호를 쓰고 있습니다.</b><p>정식 서비스 전까지는 괜찮지만, 정식 서비스를 시작하면 강한 비밀번호(${POLICY.strong_rule})로 바꿔야 합니다. 미리 바꿔 두면 편합니다. <a href="#/password">지금 바꾸기</a></p></div>`);
+    : String(html`<div class="note amber" role="status"><b>임시(간단한) 비밀번호를 쓰고 있습니다.</b><p>정식 서비스 전까지는 괜찮지만, 정식 서비스를 시작하면 강한 비밀번호(${POLICY.strong_rule})로 바꿔야 합니다. 미리 바꿔 두면 편합니다. <a href="#/password">지금 바꾸기</a></p></div>`));
 }
 
 function nav() {
   pwBanner();
-  const links = ME && !MUST ? [["#/", "대시보드"], ["#/users", "회원"], ["#/ideas", "아이디어"], ["#/access", "열람·NDA"], ["#/loans", "대출 심사"], ["#/contracts", "계약·정산"], ["#/ledger", "원장"], ["#/audit", "감사 로그"]] : [];
+  const links = ME && !MUST && !MUST2FA ? [["#/", "대시보드"], ["#/users", "회원"], ["#/ideas", "아이디어"], ["#/access", "열람·NDA"], ["#/loans", "대출 심사"], ["#/contracts", "계약·정산"], ["#/ledger", "원장"], ["#/audit", "감사 로그"]] : [];
   const cur = (location.hash || "#/").split("?")[0];
   $("#nav").innerHTML = links.map(([h, t]) => `<a href="${h}" class="${cur === h || (h !== "#/" && cur.startsWith(h)) ? "on" : ""}">${esc(t)}</a>`).join("");
-  $("#who").innerHTML = ME ? String(html`<span class="nm">${ME.name} (${ME.username})</span><a class="linkbtn" href="#/password">비밀번호 변경</a><button class="linkbtn" id="lo">로그아웃</button>`) : "";
+  $("#who").innerHTML = ME ? String(html`<span class="nm">${ME.name} (${ME.username})</span><a class="linkbtn" href="#/security">보안 설정</a><button class="linkbtn" id="lo">로그아웃</button>`) : "";
   const lo = $("#lo");
-  if (lo) lo.onclick = async () => { await api("POST", "/api/logout"); ME = null; MUST = false; IB.setCsrf(null); route(); };
+  if (lo) lo.onclick = async () => { await api("POST", "/api/logout"); ME = null; MUST = MUST2FA = false; IB.setCsrf(null); route(); };
 }
 
 async function viewLogin() {
@@ -44,6 +49,7 @@ async function viewLogin() {
     <form class="form" id="f">
       <div class="field"><label for="u">관리자 아이디</label><input id="u" name="username" type="text" autocomplete="username" required></div>
       <div class="field"><label for="p">비밀번호</label><input id="p" name="password" type="password" autocomplete="current-password" required></div>
+      <div class="field" id="codef" hidden><label for="code">인증 코드 (6자리)</label><input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]{6,7}" maxlength="7"><span class="hint">휴대폰 인증 앱에 보이는 지금 코드를 넣으세요.</span></div>
       <p class="err" id="msg" hidden></p><button class="btn primary">로그인</button>
     </form>
     <p class="small muted">${st.recovery ? raw('<a href="#" id="forgot">비밀번호를 잊었나요?</a>') : "비밀번호를 잊었으면 다른 관리자나 운영자에게 재설정을 요청하세요."}</p></div>`);
@@ -51,7 +57,15 @@ async function viewLogin() {
   if (fg) fg.onclick = (e) => { e.preventDefault(); viewRecover(); };
   $("#f").onsubmit = async (ev) => {
     ev.preventDefault();
-    try { const r = await busy(ev.submitter, () => api("POST", "/api/login", IB.formData(ev.target))); setMe(r); route(); }
+    try {
+      const r = await busy(ev.submitter, () => api("POST", "/api/login", IB.formData(ev.target)));
+      if (r.need_code) {  // 비밀번호는 맞음 → 2단계 인증 코드
+        $("#codef").hidden = false; $("#code").required = true; $("#code").focus();
+        $("#msg").hidden = true; $("#u").readOnly = $("#p").readOnly = true;
+        return;
+      }
+      setMe(r); route();
+    }
     catch (e) { $("#msg").hidden = false; $("#msg").textContent = e.message; }
   };
 }
@@ -81,7 +95,7 @@ function viewSetup() {
 
 // ── 비밀번호를 잊었을 때: 설정 토큰(ADMIN_SETUP_TOKEN)으로 재설정 ──
 function viewRecover() {
-  render(html`<div class="auth card stack"><div><h1>관리자 비밀번호 재설정</h1><p class="lead">Vercel 환경 변수 <b>ADMIN_SETUP_TOKEN</b> 값을 아는 운영자만 쓸 수 있습니다. 재설정하면 그 계정은 모든 기기에서 로그아웃되고, 감사 로그에 남습니다.</p></div>
+  render(html`<div class="auth card stack"><div><h1>관리자 비밀번호 재설정</h1><p class="lead">Vercel 환경 변수 <b>ADMIN_SETUP_TOKEN</b> 값을 아는 운영자만 쓸 수 있습니다. 재설정하면 그 계정은 모든 기기에서 로그아웃되고, <b>2단계 인증도 꺼집니다</b>(휴대폰을 잃어버린 경우). 감사 로그에 남습니다.</p></div>
     <form class="form" id="rf">
       <div class="field"><label for="rt">설정 토큰</label><input id="rt" name="token" type="password" autocomplete="off" required></div>
       <div class="field"><label for="ru">관리자 아이디</label><input id="ru" name="username" type="text" autocomplete="username" required></div>
@@ -101,6 +115,51 @@ function viewRecover() {
       viewLogin();
     } catch (e) { msg.hidden = false; msg.textContent = e.message; }
   };
+}
+
+// ── 보안 설정: 비밀번호 + 2단계 인증 ──
+async function viewSecurity() {
+  const on = ME.totp;
+  render(html`<div class="auth card stack"><div><h1>보안 설정</h1><p class="lead">${ME.name} (${ME.username})</p></div>
+    <section class="stack"><h2>비밀번호</h2><p class="small muted">${ME.pw_weak ? "임시(간단한) 비밀번호를 쓰고 있습니다." : "강한 비밀번호를 쓰고 있습니다."}</p>
+      <p><a class="btn" href="#/password">비밀번호 변경</a></p></section>
+    <section class="stack"><h2>2단계 인증 ${on ? raw('<span class="badge stamp">켜짐</span>') : raw('<span class="badge wait">꺼짐</span>')}</h2>
+      <p class="small muted">로그인할 때 비밀번호와 함께 휴대폰 인증 앱(Google Authenticator, Microsoft Authenticator 등)의 6자리 코드를 넣습니다. 휴대폰을 잃어버리면 [비밀번호를 잊었나요?] 의 설정 토큰 재설정으로 2단계 인증도 초기화됩니다.</p>
+      <div id="tfa"></div></section></div>`);
+  const box = $("#tfa");
+  if (on) {
+    if (POLICY.require_2fa) { box.innerHTML = '<p class="small muted">정식 서비스 중에는 2단계 인증을 끌 수 없습니다.</p>'; return; }
+    box.innerHTML = String(html`<form class="form" id="off"><div class="field"><label for="op">현재 비밀번호</label><input id="op" name="password" type="password" autocomplete="current-password" required></div>
+      <div class="field"><label for="oc">인증 코드</label><input id="oc" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="7" required></div>
+      <p class="err" id="omsg" hidden></p><button class="btn">2단계 인증 끄기</button></form>`);
+    $("#off").onsubmit = async (ev) => {
+      ev.preventDefault();
+      try { const r = await busy(ev.submitter, () => api("POST", "/api/2fa/disable", IB.formData(ev.target))); setMe({ ...r, policy: POLICY }); toast("2단계 인증을 껐습니다."); viewSecurity(); nav(); }
+      catch (e) { $("#omsg").hidden = false; $("#omsg").textContent = e.message; }
+    };
+    return;
+  }
+  box.innerHTML = '<button class="btn primary" id="start">2단계 인증 켜기</button>';
+  $("#start").onclick = (e) => busy(e.currentTarget, async () => {
+    const r = await api("POST", "/api/2fa/begin");
+    const key = r.secret.match(/.{1,4}/g).join(" ");
+    box.innerHTML = String(html`<ol class="small stack">
+        <li>휴대폰에 인증 앱(Google Authenticator 또는 Microsoft Authenticator)을 설치합니다.</li>
+        <li>앱에서 <b>+ → 설정 키 입력</b>(Enter a setup key)을 고르고 아래 값을 넣습니다. 휴대폰으로 이 화면을 보고 있다면 <a href="${r.uri}">여기를 누르면</a> 앱에 바로 추가됩니다.
+          <div class="note"><p>계정 이름: <b>IdeaBank Admin (${r.account})</b></p><p>키: <b class="mono">${key}</b></p><p>종류: 시간 기준(TOTP)</p></div></li>
+        <li>앱에 생긴 6자리 코드를 넣고 [켜기] 를 누릅니다.</li></ol>
+      <form class="form" id="on"><div class="field"><label for="ec">인증 코드 (6자리)</label><input id="ec" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="7" required></div>
+        <p class="err" id="emsg" hidden></p><button class="btn primary">켜기</button></form>`);
+    $("#on").onsubmit = async (ev) => {
+      ev.preventDefault();
+      try {
+        const r2 = await busy(ev.submitter, () => api("POST", "/api/2fa/enable", IB.formData(ev.target)));
+        setMe({ ...r2, policy: r2.policy || POLICY });
+        toast("2단계 인증을 켰습니다. 다음 로그인부터 코드를 물어봅니다.");
+        if (MUST || MUST2FA) route(); else { viewSecurity(); nav(); }
+      } catch (e2) { $("#emsg").hidden = false; $("#emsg").textContent = e2.message; }
+    };
+  });
 }
 
 // ── 내 비밀번호 변경 ──
@@ -329,11 +388,12 @@ async function viewAudit() {
 }
 
 const ROUTES = [[/^#?\/?$/, viewDash], [/^#\/users$/, viewUsers], [/^#\/ideas$/, viewIdeas], [/^#\/ideas\/(\d+)$/, viewIdea],
-  [/^#\/access$/, viewAccess], [/^#\/loans$/, viewLoans], [/^#\/contracts$/, viewContracts], [/^#\/ledger$/, viewLedger], [/^#\/audit$/, viewAudit], [/^#\/password$/, viewPassword]];
+  [/^#\/access$/, viewAccess], [/^#\/loans$/, viewLoans], [/^#\/contracts$/, viewContracts], [/^#\/ledger$/, viewLedger], [/^#\/audit$/, viewAudit], [/^#\/password$/, viewPassword], [/^#\/security$/, viewSecurity]];
 async function route() {
   nav();
   if (!ME) return viewLogin();
   if (MUST) return viewPassword();
+  if (MUST2FA) { nav(); return viewSecurity(); }
   const [path, qs] = (location.hash || "#/").split("?");
   const q = new URLSearchParams(qs || "");
   for (const [rx, fn] of ROUTES) {

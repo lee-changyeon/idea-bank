@@ -111,7 +111,7 @@ admin/
 | HTTPS | 로컬: 없음. 온라인(Vercel): HTTPS + HSTS, 쿠키에 `Secure` | 로컬을 127.0.0.1 밖으로 열지 않기 |
 | 본문 암호화 | 로컬 평문 SQLite, 온라인 Supabase(디스크 암호화만) | 저장 시 앱 수준 암호화(해시는 평문 기준 유지, TRD §9) |
 | 원장 헤드 공개 | 검증 화면에 표시만 | 정기 외부 공개(F12), OpenTimestamps 이중 앵커 |
-| 관리자 권한 | 관리자 1종. 온라인은 비밀번호 + 로그인 실패 제한 + 감사 로그 | 역할 분리(심사·정산·감사 열람), 2단계 인증, 접속 IP 제한 |
+| 관리자 권한 | 관리자 1종. 비밀번호 + 2단계 인증(TOTP, 정식 서비스 때 필수) + 로그인 실패 제한 + 감사 로그 | 역할 분리(심사·정산·감사 열람), 접속 IP 제한 |
 | 첨부 크기 | 파일당 20MB (온라인은 브라우저가 Storage 로 직접 올리고 받음). 온라인 [검증] 화면의 증명 파일 업로드는 3MB 까지 | 큰 증명 파일도 브라우저 안에서 검증 |
 
 ## 4. 관리자 계정 관리 (`manage_admins.py`)
@@ -122,6 +122,7 @@ admin/
 python web/manage_admins.py list                     # 관리자 목록
 python web/manage_admins.py add <username> <name>    # 계정 추가 (비밀번호 입력)
 python web/manage_admins.py passwd <username>        # 비밀번호 변경
+python web/manage_admins.py reset2fa <username>      # 2단계 인증 초기화 (휴대폰 분실)
 ```
 
 - 비밀번호를 칠 때 글자가 화면에 보이지 않는 것이 정상입니다. 그대로 입력하고 Enter 를 누르세요. 터미널에서 입력이 아예 안 되면 `--visible` 을 붙이면 글자가 보이게 입력합니다.

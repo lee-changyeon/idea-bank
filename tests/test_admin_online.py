@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -68,6 +69,8 @@ class AdminOnlineTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("ib_api_index_test", ROOT / "api" / "index.py")
         cls.mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.mod)
+        global S
+        from ibweb import security as S  # noqa: PLW0603 (TOTP 코드 계산용)
         cls.mod._web.stamper.urls = []
         cls.mod._admin.stamper.urls = []
         cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), cls.mod.handler)
@@ -154,10 +157,54 @@ class AdminOnlineTest(unittest.TestCase):
             st, out = launched.call("POST", "/api/password", {**chg, "new_password": "Strong-Pass-2027"})
             self.assertEqual(st, 200, out)
             self.assertFalse(out["admin"]["pw_weak"])
+            me = launched.call("GET", "/api/me")[1]
+            self.assertFalse(me["must_change"])
+            self.assertTrue(me["must_2fa"])                                          # 이제 2단계 인증이 필요
+            self.assertEqual(launched.call("GET", "/api/dashboard")[0], 403)
+
+            # 2단계 인증 켜기: 키 받기 → 틀린 코드 거부 → 맞는 코드로 켜기
+            st, r = launched.call("POST", "/api/2fa/begin", {})
+            self.assertEqual(st, 200, r)
+            secret = r["secret"]
+            self.assertTrue(r["uri"].startswith("otpauth://totp/"))
+            self.assertEqual(launched.call("POST", "/api/2fa/enable", {"code": "000000" if S.totp_now(secret) != "000000" else "111111"})[0], 400)
+            st, r = launched.call("POST", "/api/2fa/enable", {"code": S.totp_now(secret)})
+            self.assertEqual(st, 200, r)
+            self.assertTrue(r["admin"]["totp"])
+            self.assertFalse(r["must_2fa"])
             self.assertEqual(launched.call("GET", "/api/dashboard")[0], 200)          # 이제 쓸 수 있다
-            self.assertFalse(launched.call("GET", "/api/me")[1]["must_change"])
+            self.assertEqual(launched.call("POST", "/api/2fa/disable", {"password": "Strong-Pass-2027", "code": "123456"})[0], 403)
+
+            # 다음 로그인: 비밀번호 → 코드 요청 → 틀린 코드 401 → 맞는 코드 → 같은 코드 다시 쓰면 401
+            c2 = Client(self.port, ADMIN_HOST)
+            creds = {"username": "ceo", "password": "Strong-Pass-2027"}
+            st, r = c2.call("POST", "/api/login", creds)
+            self.assertEqual((st, r.get("need_code")), (200, True))
+            self.assertEqual(c2.call("GET", "/api/dashboard")[0], 401)               # 코드 전에는 세션 없음
+            code = S.totp_now(secret, time.time() + 30)                               # 켤 때 쓴 칸 다음 칸
+            bad = "000000" if code != "000000" else "111111"
+            self.assertEqual(c2.call("POST", "/api/login", {**creds, "code": bad})[0], 401)
+            st, r = c2.call("POST", "/api/login", {**creds, "code": code})
+            self.assertEqual(st, 200, r)
+            self.assertEqual(c2.call("GET", "/api/dashboard")[0], 200)
+            self.assertEqual(Client(self.port, ADMIN_HOST).call("POST", "/api/login", {**creds, "code": code})[0], 401)
         finally:
             os.environ.pop("IB_LAUNCHED", None)
+
+        # 정식 서비스 전: 2단계 인증은 선택 — 비밀번호 + 코드로 끌 수 있다
+        self.mod._admin.db.exec("UPDATE admins SET totp_last=0 WHERE username='ceo'")  # 30초가 지난 것처럼
+        st, r = c2.call("POST", "/api/2fa/disable", {"password": "Strong-Pass-2027", "code": S.totp_now(secret)})
+        self.assertEqual(st, 200, r)
+        self.assertFalse(r["admin"]["totp"])
+
+        # 휴대폰 분실: 설정 토큰 재설정이 2단계 인증도 초기화
+        st, r = c2.call("POST", "/api/2fa/begin", {})
+        c2.call("POST", "/api/2fa/enable", {"code": S.totp_now(r["secret"])})
+        self.assertEqual(Client(self.port, ADMIN_HOST).call("POST", "/api/recover", {"token": TOKEN, "username": "ceo", "password": "Recovered-2027!"})[0], 200)
+        st, r = Client(self.port, ADMIN_HOST).call("POST", "/api/login", {"username": "ceo", "password": "Recovered-2027!"})
+        self.assertEqual(st, 200, r)
+        self.assertFalse(r.get("need_code", False))
+        self.assertFalse(r["admin"]["totp"])
 
         # 관리자 쿠키는 사용자 주소에서 쓰이지 않는다 (호스트별 쿠키)
         self.assertIsNone(user.call("GET", "/api/me")[1]["user"])

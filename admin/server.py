@@ -32,17 +32,31 @@ USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
 
 
 def admin_public(a):
-    return {"id": a["id"], "username": a["username"], "name": a["name"], "pw_weak": bool(a["pw_weak"])}
+    return {"id": a["id"], "username": a["username"], "name": a["name"], "pw_weak": bool(a["pw_weak"]),
+            "totp": bool(a["totp_on"])}
 
 
 def _must_change(a) -> bool:
     return S.launched() and bool(a["pw_weak"])
 
 
+def _must_2fa(a) -> bool:
+    return S.launched() and not a["totp_on"]
+
+
+def _state(a) -> dict:
+    return {"policy": S.admin_policy(), "must_change": bool(a and _must_change(a)), "must_2fa": bool(a and _must_2fa(a))}
+
+
 def _guard(req, path):
-    """정식 서비스 중 약한 비밀번호 관리자는 비밀번호를 바꾸기 전에는 다른 기능을 쓸 수 없다."""
-    if req.user and _must_change(req.user) and path not in ("/api/password", "/api/me", "/api/logout"):
+    """정식 서비스 중에는 약한 비밀번호를 바꾸고 2단계 인증을 켜기 전까지 다른 기능을 쓸 수 없다."""
+    if not req.user:
+        return
+    if _must_change(req.user) and path not in ("/api/password", "/api/me", "/api/logout"):
         raise forbidden("정식 서비스가 시작되어 비밀번호를 먼저 바꿔야 합니다. [비밀번호 변경] 화면에서 바꿔 주세요.")
+    if _must_2fa(req.user) and path not in ("/api/2fa/begin", "/api/2fa/enable", "/api/password", "/api/me",
+                                            "/api/logout"):
+        raise forbidden("정식 서비스가 시작되어 2단계 인증을 먼저 켜야 합니다. [보안 설정] 화면에서 켜 주세요.")
 
 
 app.guard = _guard
@@ -56,7 +70,7 @@ def _set_pw(admin_id, pw: str):
 @app.route("GET", "/api/me")
 def r_me(req):
     return {"admin": admin_public(req.user) if req.user else None, "csrf": req.session["csrf"] if req.session else None,
-            "policy": S.admin_policy(), "must_change": bool(req.user and _must_change(req.user))}
+            **_state(req.user)}
 
 
 # ── 첫 관리자 만들기 · 비밀번호 잊었을 때 재설정 (온라인 전용) ──
@@ -100,9 +114,12 @@ def r_recover(req):
     if not a:
         raise bad("그런 관리자 아이디가 없습니다.")
     _set_pw(a["id"], pw)
+    had_2fa = bool(a["totp_on"])
+    db.exec("UPDATE admins SET totp_on=0, totp_secret=NULL, totp_last=0 WHERE id=?", (a["id"],))  # 휴대폰 분실 대비
     db.exec("DELETE FROM sessions WHERE kind='admin' AND subject_id=?", (a["id"],))  # 모든 기기에서 로그아웃
     throttle.clear(f"{req.ip}|{username}")
-    svc.audit(db, a, "비밀번호 재설정 (설정 토큰)", username, {"via": "recover"}, req.ip)
+    acct_limit.clear(f"acct|{username}")
+    svc.audit(db, a, "비밀번호 재설정 (설정 토큰)", username, {"via": "recover", "2fa_reset": had_2fa}, req.ip)
     return {"ok": True}
 
 
@@ -143,6 +160,17 @@ def r_login(req):
         if db.one("SELECT 1 FROM admins WHERE username=?", (username,)):  # 없는 아이디는 기록하지 않음(로그 부풀림 방지)
             svc.audit(db, None, "관리자 로그인 실패", username, {}, req.ip)
         raise HttpError(401, "아이디 또는 비밀번호가 맞지 않습니다.")
+    if a["totp_on"]:  # 2단계 인증: 비밀번호가 맞으면 인증 앱의 6자리 코드를 한 번 더 받는다
+        code = str(req.get("code") or "").strip()
+        if not code:
+            return {"need_code": True}  # 세션은 아직 만들지 않는다
+        counter = S.totp_check(a["totp_secret"], code, a["totp_last"])
+        if counter is None:
+            throttle.fail(key)
+            acct_limit.fail(acct)
+            svc.audit(db, None, "관리자 로그인 실패", username, {"reason": "2단계 인증 코드 불일치"}, req.ip)
+            raise HttpError(401, "인증 코드가 맞지 않습니다. 인증 앱의 지금 코드를 넣어 주세요.")
+        db.exec("UPDATE admins SET totp_last=? WHERE id=?", (counter, a["id"]))
     throttle.clear(key)
     acct_limit.clear(acct)
     weak = 0 if S.admin_pw_strong(pw) else 1  # 원문은 로그인할 때만 알 수 있으므로 여기서 강도를 다시 기록
@@ -151,9 +179,58 @@ def r_login(req):
         a = db.one("SELECT * FROM admins WHERE id=?", (a["id"],))
     S.end_session(db, app._cookie(req.h))
     token, csrf = S.new_session(db, "admin", a["id"])
-    svc.audit(db, a, "로그인", "", {"weak_password": bool(weak)}, req.ip)
-    out = {"admin": admin_public(a), "csrf": csrf, "policy": S.admin_policy(), "must_change": _must_change(a)}
+    svc.audit(db, a, "로그인", "", {"weak_password": bool(weak), "2fa": bool(a["totp_on"])}, req.ip)
+    out = {"admin": admin_public(a), "csrf": csrf, **_state(a)}
     return out, app.set_cookie(token)
+
+
+# ── 2단계 인증 켜기·끄기 ──
+@app.route("POST", "/api/2fa/begin", auth="admin")
+def r_2fa_begin(req):
+    """새 비밀 키를 만든다. 인증 앱에 등록한 뒤 /api/2fa/enable 에 코드를 넣어야 켜진다."""
+    a = req.user
+    if a["totp_on"]:
+        raise bad("이미 2단계 인증이 켜져 있습니다.")
+    secret = S.totp_new_secret()
+    db.exec("UPDATE admins SET totp_secret=?, totp_last=0 WHERE id=?", (secret, a["id"]))
+    return {"secret": secret, "uri": S.totp_uri(secret, a["username"]), "account": a["username"]}
+
+
+@app.route("POST", "/api/2fa/enable", auth="admin")
+def r_2fa_enable(req):
+    a = db.one("SELECT * FROM admins WHERE id=?", (req.user["id"],))
+    if a["totp_on"]:
+        raise bad("이미 2단계 인증이 켜져 있습니다.")
+    if not a["totp_secret"]:
+        raise bad("먼저 [2단계 인증 켜기] 를 눌러 비밀 키를 받으세요.")
+    counter = S.totp_check(a["totp_secret"], req.get("code"), 0)
+    if counter is None:
+        raise bad("인증 코드가 맞지 않습니다. 인증 앱에 키를 정확히 넣었는지, 휴대폰 시각이 맞는지 확인해 주세요.")
+    db.exec("UPDATE admins SET totp_on=1, totp_last=? WHERE id=?", (counter, a["id"]))
+    db.exec("DELETE FROM sessions WHERE kind='admin' AND subject_id=? AND token_hash!=?", (a["id"], req.session["token_hash"]))
+    svc.audit(db, a, "2단계 인증 켜기", a["username"], {}, req.ip)
+    a = db.one("SELECT * FROM admins WHERE id=?", (a["id"],))
+    return {"admin": admin_public(a), **_state(a)}
+
+
+@app.route("POST", "/api/2fa/disable", auth="admin")
+def r_2fa_disable(req):
+    a = db.one("SELECT * FROM admins WHERE id=?", (req.user["id"],))
+    if S.launched():
+        raise forbidden("정식 서비스 중에는 2단계 인증을 끌 수 없습니다.")
+    if not a["totp_on"]:
+        raise bad("2단계 인증이 꺼져 있습니다.")
+    key = f"{req.ip}|2fa-off|{a['id']}"
+    if throttle.blocked(key):
+        raise HttpError(429, "확인 실패가 많아 10분 동안 잠겼습니다.")
+    if not S.check_password(str(req.get("password") or ""), a["pw"]) or \
+            S.totp_check(a["totp_secret"], req.get("code"), a["totp_last"]) is None:
+        throttle.fail(key)
+        raise bad("비밀번호 또는 인증 코드가 맞지 않습니다.")
+    db.exec("UPDATE admins SET totp_on=0, totp_secret=NULL, totp_last=0 WHERE id=?", (a["id"],))
+    svc.audit(db, a, "2단계 인증 끄기", a["username"], {}, req.ip)
+    a = db.one("SELECT * FROM admins WHERE id=?", (a["id"],))
+    return {"admin": admin_public(a), **_state(a)}
 
 
 @app.route("POST", "/api/logout")
