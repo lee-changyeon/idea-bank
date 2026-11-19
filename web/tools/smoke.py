@@ -141,6 +141,8 @@ def run(base: str, expect_tsa=True) -> dict:
     check(tag in full["body"], "NDA 후 전문 열람")
     sha = full["attachments"][0]["sha256"]
     got = biz.call("GET", f"/api/market/{seq}/files/{sha}", raw=True)
+    if got[:1] == b"{":  # 온라인: Storage 서명 주소로 내려받기
+        got = urllib.request.urlopen(json.loads(got)["download_url"], timeout=60).read()
     check(got == att, "첨부 열람 (저장소 원본과 같음)")
 
     views = cr.call("GET", "/api/my/views")["views"]
