@@ -311,13 +311,15 @@ class PgDB:
         self.url = url
         self.lock = threading.RLock()
         self._raw = None
-        with self.lock:
-            self._ensure_schema()
+        self._schema_ok = False  # 첫 연결 때 확인. 시작할 때 연결하지 않으므로 DB 장애에도 정적 화면은 뜬다
 
     # 연결: 인스턴스마다 1개를 재사용, 끊기면 다시 연결 (Supabase 트랜잭션 풀러 → prepare 끔)
     def _connect(self):
         import psycopg  # Postgres 모드에서만 필요 (requirements.txt)
         self._raw = psycopg.connect(self.url, autocommit=True, prepare_threshold=None, connect_timeout=10)
+        if not self._schema_ok:
+            self._ensure_schema(self._raw)
+            self._schema_ok = True
         return self._raw
 
     @property
@@ -335,13 +337,14 @@ class PgDB:
                 return fn(PgConn(self._connect()))  # 한 번만 다시 연결해서 재시도
             raise
 
-    def _ensure_schema(self):
-        if self._run(lambda c: c.execute("SELECT to_regclass('public.login_fails')").fetchone()[0]):
+    @staticmethod
+    def _ensure_schema(raw):
+        if raw.execute("SELECT to_regclass('public.login_fails')").fetchone()[0]:
             return
         sql = (Path(__file__).with_name("schema_pg.sql")).read_text(encoding="utf-8")
-        with self.raw.transaction():
-            self.raw.execute("SELECT pg_advisory_xact_lock(%s)", (LEDGER_LOCK,))
-            self.raw.execute(sql)
+        with raw.transaction():
+            raw.execute("SELECT pg_advisory_xact_lock(%s)", (LEDGER_LOCK,))
+            raw.execute(sql)
 
     @property
     def conn(self):  # ideabank.bundle.verify 등 .execute 만 쓰는 곳을 위한 어댑터

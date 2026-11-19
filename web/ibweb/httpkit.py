@@ -189,8 +189,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._static(path)
         except HttpError as e:
             self._json(e.status, {"error": e.msg})
-        except Exception:
+        except Exception as ex:
             traceback.print_exc()
+            if any(c.__name__ == "OperationalError" for c in type(ex).__mro__):  # psycopg: DB 에 연결하지 못함
+                return self._json(503, {"error": "데이터베이스에 연결하지 못했습니다. 잠시 뒤 다시 시도해 주세요."})
             self._json(500, {"error": "서버 오류가 났습니다. 잠시 뒤 다시 시도해 주세요."})
 
     def _api(self, method, path):
