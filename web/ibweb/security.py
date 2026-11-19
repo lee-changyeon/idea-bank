@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import secrets
 import threading
 import time
@@ -10,6 +11,35 @@ import time
 from ideabank import canonical as C
 
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 14, 8, 1
+
+# ── 관리자 비밀번호 정책 ──
+# 정식 서비스 전(IB_LAUNCHED 가 없음): 간단한 비밀번호(4자 이상)도 허용하되, 화면에서 계속 바꾸라고 안내한다.
+# 정식 서비스(IB_LAUNCHED=1): 강한 비밀번호만 허용. 약한 비밀번호로 로그인하면 바꾸기 전에는 다른 기능을 쓸 수 없다.
+PRELAUNCH_MIN = 4
+STRONG_MIN = 12
+STRONG_RULE = f"{STRONG_MIN}자 이상, 영문 소문자·대문자·숫자·특수문자 중 3가지 이상"
+
+
+def launched() -> bool:
+    return os.environ.get("IB_LAUNCHED", "").strip() == "1"
+
+
+def admin_pw_strong(pw: str) -> bool:
+    kinds = sum([any(c.islower() for c in pw), any(c.isupper() for c in pw), any(c.isdigit() for c in pw),
+                 any(not c.isalnum() for c in pw)])
+    return len(pw) >= STRONG_MIN and kinds >= 3
+
+
+def admin_pw_problem(pw: str) -> str | None:
+    """정책에 맞지 않으면 안내 문구, 맞으면 None."""
+    if launched():
+        return None if admin_pw_strong(pw) else f"정식 서비스 중에는 강한 비밀번호만 쓸 수 있습니다: {STRONG_RULE}."
+    return None if len(pw) >= PRELAUNCH_MIN else f"비밀번호는 {PRELAUNCH_MIN}자 이상으로 정해 주세요."
+
+
+def admin_policy() -> dict:
+    on = launched()
+    return {"launched": on, "min_len": STRONG_MIN if on else PRELAUNCH_MIN, "strong_rule": STRONG_RULE}
 SESSION_TTL = 8 * 3600
 
 

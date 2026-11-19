@@ -18,7 +18,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV_KEYS = ("IB_DATA_DIR", "DATABASE_URL", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "VERCEL", "ADMIN_SETUP_TOKEN",
-            "IB_ADMIN_HOSTS")
+            "IB_ADMIN_HOSTS", "IB_LAUNCHED")
 ADMIN_HOST = "admin.test"
 TOKEN = "setup-token-for-test"
 
@@ -102,17 +102,21 @@ class AdminOnlineTest(unittest.TestCase):
 
         # 첫 관리자 만들기: 토큰이 틀리면 거부, 맞으면 한 번만
         self.assertTrue(admin.call("GET", "/api/setup")[1]["needed"])
-        body = {"token": "wrong", "username": "ceo", "name": "대표", "password": "a-long-password-123"}
+        # 정식 서비스 전: 간단한 비밀번호(4자 이상)도 허용, 대신 pw_weak 로 표시되어 화면에서 변경을 권한다
+        body = {"token": "wrong", "username": "ceo", "name": "대표", "password": "ceo1234"}
         self.assertEqual(admin.call("POST", "/api/setup", body)[0], 403)
         body["token"] = TOKEN
-        self.assertEqual(admin.call("POST", "/api/setup", {**body, "password": "short"})[0], 400)
+        self.assertEqual(admin.call("POST", "/api/setup", {**body, "password": "abc"})[0], 400)
         self.assertEqual(admin.call("POST", "/api/setup", body)[0], 200)
         self.assertFalse(admin.call("GET", "/api/setup")[1]["needed"])
         self.assertEqual(admin.call("POST", "/api/setup", {**body, "username": "second"})[0], 403)
 
         # 로그인 → 대시보드 → 원장·감사 로그 무결성
-        st, me = admin.call("POST", "/api/login", {"username": "ceo", "password": "a-long-password-123"})
+        st, me = admin.call("POST", "/api/login", {"username": "ceo", "password": "ceo1234"})
         self.assertEqual(st, 200, me)
+        self.assertTrue(me["admin"]["pw_weak"])          # 간단한 비밀번호 → 약함 표시
+        self.assertFalse(me["must_change"])              # 정식 서비스 전이라 강제는 아님
+        self.assertFalse(me["policy"]["launched"])
         self.assertEqual(admin.call("GET", "/api/dashboard")[0], 200)
         st, led = admin.call("POST", "/api/ledger/verify", {})
         self.assertEqual(st, 200, led)
@@ -123,18 +127,37 @@ class AdminOnlineTest(unittest.TestCase):
         # 비밀번호를 잊었을 때: 토큰이 틀리면 거부, 맞으면 재설정 + 기존 로그인 끊김 + 감사 로그
         self.assertTrue(admin.call("GET", "/api/setup")[1]["recovery"])
         other = Client(self.port, ADMIN_HOST)
-        rec = {"token": "wrong", "username": "ceo", "password": "brand-new-password-456"}
+        rec = {"token": "wrong", "username": "ceo", "password": "newpass99"}
         self.assertEqual(other.call("POST", "/api/recover", rec)[0], 403)
         self.assertEqual(other.call("POST", "/api/recover", {**rec, "token": TOKEN, "username": "nobody"})[0], 400)
-        self.assertEqual(other.call("POST", "/api/recover", {**rec, "token": TOKEN, "password": "short"})[0], 400)
+        self.assertEqual(other.call("POST", "/api/recover", {**rec, "token": TOKEN, "password": "abc"})[0], 400)
         self.assertEqual(other.call("POST", "/api/recover", {**rec, "token": TOKEN})[0], 200)
         self.assertEqual(admin.call("GET", "/api/dashboard")[0], 401)  # 기존 세션은 끊김
-        self.assertEqual(other.call("POST", "/api/login", {"username": "ceo", "password": "a-long-password-123"})[0], 401)
-        st, _ = other.call("POST", "/api/login", {"username": "ceo", "password": "brand-new-password-456"})
+        self.assertEqual(other.call("POST", "/api/login", {"username": "ceo", "password": "ceo1234"})[0], 401)
+        st, _ = other.call("POST", "/api/login", {"username": "ceo", "password": "newpass99"})
         self.assertEqual(st, 200)
         st, aud = other.call("GET", "/api/audit")
         self.assertTrue(aud["integrity"]["ok"])
         self.assertTrue(any(r["action"] == "비밀번호 재설정 (설정 토큰)" for r in aud["audit"]))
+
+        # 정식 서비스 시작(IB_LAUNCHED=1): 약한 비밀번호 관리자는 바꾸기 전에는 다른 기능을 못 쓴다
+        os.environ["IB_LAUNCHED"] = "1"
+        try:
+            launched = Client(self.port, ADMIN_HOST)
+            st, me = launched.call("POST", "/api/login", {"username": "ceo", "password": "newpass99"})
+            self.assertEqual(st, 200)
+            self.assertTrue(me["must_change"])
+            self.assertEqual(launched.call("GET", "/api/dashboard")[0], 403)
+            self.assertTrue(launched.call("GET", "/api/me")[1]["must_change"])
+            chg = {"current_password": "newpass99", "new_password": "simple1234"}
+            self.assertEqual(launched.call("POST", "/api/password", chg)[0], 400)     # 약한 비밀번호는 거부
+            st, out = launched.call("POST", "/api/password", {**chg, "new_password": "Strong-Pass-2027"})
+            self.assertEqual(st, 200, out)
+            self.assertFalse(out["admin"]["pw_weak"])
+            self.assertEqual(launched.call("GET", "/api/dashboard")[0], 200)          # 이제 쓸 수 있다
+            self.assertFalse(launched.call("GET", "/api/me")[1]["must_change"])
+        finally:
+            os.environ.pop("IB_LAUNCHED", None)
 
         # 관리자 쿠키는 사용자 주소에서 쓰이지 않는다 (호스트별 쿠키)
         self.assertIsNone(user.call("GET", "/api/me")[1]["user"])

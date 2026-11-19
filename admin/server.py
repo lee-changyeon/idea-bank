@@ -30,12 +30,31 @@ USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
 
 
 def admin_public(a):
-    return {"id": a["id"], "username": a["username"], "name": a["name"]}
+    return {"id": a["id"], "username": a["username"], "name": a["name"], "pw_weak": bool(a["pw_weak"])}
+
+
+def _must_change(a) -> bool:
+    return S.launched() and bool(a["pw_weak"])
+
+
+def _guard(req, path):
+    """정식 서비스 중 약한 비밀번호 관리자는 비밀번호를 바꾸기 전에는 다른 기능을 쓸 수 없다."""
+    if req.user and _must_change(req.user) and path not in ("/api/password", "/api/me", "/api/logout"):
+        raise forbidden("정식 서비스가 시작되어 비밀번호를 먼저 바꿔야 합니다. [비밀번호 변경] 화면에서 바꿔 주세요.")
+
+
+app.guard = _guard
+
+
+def _set_pw(admin_id, pw: str):
+    db.exec("UPDATE admins SET pw=?, pw_weak=? WHERE id=?",
+            (S.hash_password(pw), 0 if S.admin_pw_strong(pw) else 1, admin_id))
 
 
 @app.route("GET", "/api/me")
 def r_me(req):
-    return {"admin": admin_public(req.user) if req.user else None, "csrf": req.session["csrf"] if req.session else None}
+    return {"admin": admin_public(req.user) if req.user else None, "csrf": req.session["csrf"] if req.session else None,
+            "policy": S.admin_policy(), "must_change": bool(req.user and _must_change(req.user))}
 
 
 # ── 첫 관리자 만들기 · 비밀번호 잊었을 때 재설정 (온라인 전용) ──
@@ -50,7 +69,7 @@ def _setup_token() -> str:
 @app.route("GET", "/api/setup")
 def r_setup_state(req):
     on = bool(_setup_token())
-    return {"needed": on and not db.val("SELECT COUNT(*) FROM admins"), "recovery": on}
+    return {"needed": on and not db.val("SELECT COUNT(*) FROM admins"), "recovery": on, "policy": S.admin_policy()}
 
 
 def _check_token(req, key: str):
@@ -71,12 +90,13 @@ def r_recover(req):
     username = str(req.get("username")).strip().lower()
     _check_token(req, f"{req.ip}|recover")
     pw = str(req.get("password"))
-    if len(pw) < 12:
-        raise bad("새 비밀번호는 12자 이상으로 정해 주세요.")
+    problem = S.admin_pw_problem(pw)
+    if problem:
+        raise bad(problem)
     a = db.one("SELECT * FROM admins WHERE username=?", (username,))
     if not a:
         raise bad("그런 관리자 아이디가 없습니다.")
-    db.exec("UPDATE admins SET pw=? WHERE id=?", (S.hash_password(pw), a["id"]))
+    _set_pw(a["id"], pw)
     db.exec("DELETE FROM sessions WHERE kind='admin' AND subject_id=?", (a["id"],))  # 모든 기기에서 로그아웃
     throttle.clear(f"{req.ip}|{username}")
     svc.audit(db, a, "비밀번호 재설정 (설정 토큰)", username, {"via": "recover"}, req.ip)
@@ -93,13 +113,14 @@ def r_setup(req):
         raise bad("아이디는 영문 소문자로 시작하는 2~32자(a-z, 0-9, _)입니다.")
     if not name:
         raise bad("이름을 적어 주세요.")
-    if len(pw) < 12:
-        raise bad("온라인 관리자 비밀번호는 12자 이상으로 정해 주세요.")
+    problem = S.admin_pw_problem(pw)
+    if problem:
+        raise bad(problem)
     with db.tx() as conn:  # 동시에 두 명이 만들지 못하도록 쓰기 잠금 안에서 다시 확인
         if conn.execute("SELECT COUNT(*) FROM admins").fetchone()[0]:
             raise forbidden("이미 관리자 계정이 있습니다. 로그인해 주세요.")
-        conn.execute("INSERT INTO admins (username, name, pw, created_at) VALUES (?,?,?,?)",
-                     (username, name, S.hash_password(pw), C.now_iso()))
+        conn.execute("INSERT INTO admins (username, name, pw, created_at, pw_weak) VALUES (?,?,?,?,?)",
+                     (username, name, S.hash_password(pw), C.now_iso(), 0 if S.admin_pw_strong(pw) else 1))
     a = db.one("SELECT * FROM admins WHERE username=?", (username,))
     svc.audit(db, a, "첫 관리자 계정 만들기", username, {"via": "setup"}, req.ip)
     return {"ok": True}
@@ -111,16 +132,22 @@ def r_login(req):
     key = f"{req.ip}|{username}"
     if throttle.blocked(key):
         raise HttpError(429, "로그인 실패가 많아 10분 동안 잠겼습니다.")
-    a = svc.authenticate(db, "admins", "username", username, str(req.get("password")))
+    pw = str(req.get("password"))
+    a = svc.authenticate(db, "admins", "username", username, pw)
     if not a:
         throttle.fail(key)
         svc.audit(db, None, "관리자 로그인 실패", username, {}, req.ip)
         raise HttpError(401, "아이디 또는 비밀번호가 맞지 않습니다.")
     throttle.clear(key)
+    weak = 0 if S.admin_pw_strong(pw) else 1  # 원문은 로그인할 때만 알 수 있으므로 여기서 강도를 다시 기록
+    if weak != a["pw_weak"]:
+        db.exec("UPDATE admins SET pw_weak=? WHERE id=?", (weak, a["id"]))
+        a = db.one("SELECT * FROM admins WHERE id=?", (a["id"],))
     S.end_session(db, app._cookie(req.h))
     token, csrf = S.new_session(db, "admin", a["id"])
-    svc.audit(db, a, "로그인", "", {}, req.ip)
-    return {"admin": admin_public(a), "csrf": csrf}, app.set_cookie(token)
+    svc.audit(db, a, "로그인", "", {"weak_password": bool(weak)}, req.ip)
+    out = {"admin": admin_public(a), "csrf": csrf, "policy": S.admin_policy(), "must_change": _must_change(a)}
+    return out, app.set_cookie(token)
 
 
 @app.route("POST", "/api/logout")
@@ -144,14 +171,15 @@ def r_password(req):
         svc.audit(db, a, "비밀번호 변경 실패", a["username"], {"reason": "현재 비밀번호 불일치"}, req.ip)
         raise HttpError(400, "현재 비밀번호가 맞지 않습니다.")
     throttle.clear(key)
-    if len(new) < 8:
-        raise HttpError(400, "새 비밀번호는 8자 이상으로 정해 주세요.")
+    problem = S.admin_pw_problem(new)
+    if problem:
+        raise HttpError(400, problem)
     if new == current:
         raise HttpError(400, "새 비밀번호가 지금 비밀번호와 같습니다.")
-    db.exec("UPDATE admins SET pw=? WHERE id=?", (S.hash_password(new), a["id"]))
+    _set_pw(a["id"], new)
     db.exec("DELETE FROM sessions WHERE kind='admin' AND subject_id=? AND token_hash!=?", (a["id"], req.session["token_hash"]))
-    svc.audit(db, a, "비밀번호 변경", a["username"], {}, req.ip)
-    return {"ok": True}
+    svc.audit(db, a, "비밀번호 변경", a["username"], {"strong": S.admin_pw_strong(new)}, req.ip)
+    return {"ok": True, "admin": admin_public(db.one("SELECT * FROM admins WHERE id=?", (a["id"],)))}
 
 
 # ── 대시보드·원장 ──

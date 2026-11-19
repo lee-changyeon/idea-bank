@@ -93,6 +93,7 @@ class App:
         self.name, self.db, self.kind, self.cookie = name, db, kind, cookie
         self.static_dirs = static_dirs
         self.routes: list[tuple[str, re.Pattern, callable, object]] = []
+        self.guard = None  # guard(req, path): 로그인한 요청마다 추가 검사 (관리자: 정식 서비스 때 약한 비밀번호 차단)
 
     def route(self, method: str, pattern: str, auth=None):
         """auth: None(공개) | 'any'(로그인) | 'creator' | 'business' | 'admin'"""
@@ -220,6 +221,8 @@ class Handler(BaseHTTPRequestHandler):
                     raise forbidden("이 기능은 " + ("창안자" if auth == "creator" else "사업자") + " 계정만 쓸 수 있습니다.")
                 if auth == "admin" and app.kind != "admin":
                     raise forbidden()
+                if app.guard:
+                    app.guard(req, path)
             out = fn(req)
             if isinstance(out, Response):
                 return self._send(out.status, out.body, out.ctype, out.headers)

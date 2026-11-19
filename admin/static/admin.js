@@ -5,6 +5,10 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const main = $("#main");
 let ME = null;
+let POLICY = { launched: false, min_len: 4, strong_rule: "12자 이상, 영문 소문자·대문자·숫자·특수문자 중 3가지 이상" };
+let MUST = false; // 정식 서비스 중 약한 비밀번호 → 바꾸기 전에는 다른 화면을 못 씀
+const setMe = (r) => { ME = r.admin; if (r.policy) POLICY = r.policy; MUST = !!r.must_change; };
+const pwHint = () => (POLICY.launched ? POLICY.strong_rule : `${POLICY.min_len}자 이상 (정식 서비스 전 임시 기준. 권장: ${POLICY.strong_rule})`);
 const PAY = { upfront: "계약금", royalty: "매출 로열티", profit: "이익 배당", equity: "지분" };
 
 function render(c) { main.innerHTML = String(c); main.focus({ preventScroll: true }); }
@@ -12,18 +16,29 @@ function go(h) { if (location.hash === h) route(); else location.hash = h; }
 const errorView = (e) => render(html`<div class="card empty"><p class="err">${e.message}</p></div>`);
 const short = (h, n = 14) => (h ? h.slice(0, n) + "…" : "");
 
+// 간단한(약한) 비밀번호 안내 띠: 정식 서비스 전에는 권유, 정식 서비스 중에는 필수
+function pwBanner() {
+  let bn = $("#pwbanner");
+  if (!bn) { bn = document.createElement("div"); bn.id = "pwbanner"; bn.className = "wrap"; main.before(bn); }
+  if (!ME || !ME.pw_weak) { bn.innerHTML = ""; return; }
+  bn.innerHTML = MUST
+    ? String(html`<div class="note bad" role="alert"><b>정식 서비스가 시작되어 비밀번호를 바꿔야 합니다.</b><p>지금 비밀번호는 보안 기준에 못 미칩니다. 새 비밀번호(${POLICY.strong_rule})로 바꾸기 전에는 다른 기능을 쓸 수 없습니다.</p></div>`)
+    : String(html`<div class="note amber" role="status"><b>임시(간단한) 비밀번호를 쓰고 있습니다.</b><p>정식 서비스 전까지는 괜찮지만, 정식 서비스를 시작하면 강한 비밀번호(${POLICY.strong_rule})로 바꿔야 합니다. 미리 바꿔 두면 편합니다. <a href="#/password">지금 바꾸기</a></p></div>`);
+}
+
 function nav() {
-  const links = ME ? [["#/", "대시보드"], ["#/users", "회원"], ["#/ideas", "아이디어"], ["#/access", "열람·NDA"], ["#/loans", "대출 심사"], ["#/contracts", "계약·정산"], ["#/ledger", "원장"], ["#/audit", "감사 로그"]] : [];
+  pwBanner();
+  const links = ME && !MUST ? [["#/", "대시보드"], ["#/users", "회원"], ["#/ideas", "아이디어"], ["#/access", "열람·NDA"], ["#/loans", "대출 심사"], ["#/contracts", "계약·정산"], ["#/ledger", "원장"], ["#/audit", "감사 로그"]] : [];
   const cur = (location.hash || "#/").split("?")[0];
   $("#nav").innerHTML = links.map(([h, t]) => `<a href="${h}" class="${cur === h || (h !== "#/" && cur.startsWith(h)) ? "on" : ""}">${esc(t)}</a>`).join("");
   $("#who").innerHTML = ME ? String(html`<span class="nm">${ME.name} (${ME.username})</span><a class="linkbtn" href="#/password">비밀번호 변경</a><button class="linkbtn" id="lo">로그아웃</button>`) : "";
   const lo = $("#lo");
-  if (lo) lo.onclick = async () => { await api("POST", "/api/logout"); ME = null; IB.setCsrf(null); route(); };
+  if (lo) lo.onclick = async () => { await api("POST", "/api/logout"); ME = null; MUST = false; IB.setCsrf(null); route(); };
 }
 
 async function viewLogin() {
   let st = {};
-  try { st = await api("GET", "/api/setup"); } catch (_) {}
+  try { st = await api("GET", "/api/setup"); if (st.policy) POLICY = st.policy; } catch (_) {}
   if (st.needed) return viewSetup();
   render(html`<div class="auth card stack"><div><h1>관리자 로그인</h1><p class="lead">운영자 전용입니다. 모든 행동은 감사 로그에 남습니다.</p></div>
     <form class="form" id="f">
@@ -36,7 +51,7 @@ async function viewLogin() {
   if (fg) fg.onclick = (e) => { e.preventDefault(); viewRecover(); };
   $("#f").onsubmit = async (ev) => {
     ev.preventDefault();
-    try { const r = await busy(ev.submitter, () => api("POST", "/api/login", IB.formData(ev.target))); ME = r.admin; route(); }
+    try { const r = await busy(ev.submitter, () => api("POST", "/api/login", IB.formData(ev.target))); setMe(r); route(); }
     catch (e) { $("#msg").hidden = false; $("#msg").textContent = e.message; }
   };
 }
@@ -48,8 +63,8 @@ function viewSetup() {
       <div class="field"><label for="st">설정 토큰</label><input id="st" name="token" type="password" autocomplete="off" required></div>
       <div class="field"><label for="su">관리자 아이디</label><input id="su" name="username" type="text" autocomplete="username" pattern="[a-z][a-z0-9_]{1,31}" required><span class="hint">영문 소문자로 시작, 2~32자 (예: ceo)</span></div>
       <div class="field"><label for="sn">이름</label><input id="sn" name="name" type="text" required></div>
-      <div class="field"><label for="sp">비밀번호</label><input id="sp" name="password" type="password" autocomplete="new-password" minlength="12" required><span class="hint">12자 이상</span></div>
-      <div class="field"><label for="sp2">비밀번호 확인</label><input id="sp2" type="password" autocomplete="new-password" minlength="12" required></div>
+      <div class="field"><label for="sp">비밀번호</label><input id="sp" name="password" type="password" autocomplete="new-password" minlength="${POLICY.min_len}" required><span class="hint">${pwHint()}</span></div>
+      <div class="field"><label for="sp2">비밀번호 확인</label><input id="sp2" type="password" autocomplete="new-password" minlength="${POLICY.min_len}" required></div>
       <p class="err" id="msg" hidden></p><button class="btn primary">관리자 만들기</button>
     </form></div>`);
   $("#sf").onsubmit = async (ev) => {
@@ -70,8 +85,8 @@ function viewRecover() {
     <form class="form" id="rf">
       <div class="field"><label for="rt">설정 토큰</label><input id="rt" name="token" type="password" autocomplete="off" required></div>
       <div class="field"><label for="ru">관리자 아이디</label><input id="ru" name="username" type="text" autocomplete="username" required></div>
-      <div class="field"><label for="rp">새 비밀번호</label><input id="rp" name="password" type="password" autocomplete="new-password" minlength="12" required><span class="hint">12자 이상</span></div>
-      <div class="field"><label for="rp2">새 비밀번호 확인</label><input id="rp2" type="password" autocomplete="new-password" minlength="12" required></div>
+      <div class="field"><label for="rp">새 비밀번호</label><input id="rp" name="password" type="password" autocomplete="new-password" minlength="${POLICY.min_len}" required><span class="hint">${pwHint()}</span></div>
+      <div class="field"><label for="rp2">새 비밀번호 확인</label><input id="rp2" type="password" autocomplete="new-password" minlength="${POLICY.min_len}" required></div>
       <p class="err" id="msg" hidden></p>
       <div class="btns"><button class="btn primary">비밀번호 재설정</button><a class="btn" href="#" id="back">로그인으로</a></div>
     </form></div>`);
@@ -90,14 +105,15 @@ function viewRecover() {
 
 // ── 내 비밀번호 변경 ──
 function viewPassword() {
-  render(html`<div class="auth card stack"><div><h1>비밀번호 변경</h1><p class="lead">${ME.name} (${ME.username}) 계정의 비밀번호를 바꿉니다. 바꾸면 다른 기기의 로그인은 끊기고, 감사 로그에 남습니다.</p></div>
+  render(html`<div class="auth card stack"><div><h1>비밀번호 변경</h1><p class="lead">${ME.name} (${ME.username}) 계정의 비밀번호를 바꿉니다. 바꾸면 다른 기기의 로그인은 끊기고, 감사 로그에 남습니다.</p>
+    ${POLICY.launched ? "" : html`<p class="small muted">정식 서비스 전에는 간단한 비밀번호도 쓸 수 있지만, 정식 서비스용으로는 <b>${POLICY.strong_rule}</b> 을 권합니다.</p>`}</div>
     <form class="form" id="pf">
       <input type="text" name="username" autocomplete="username" value="${ME.username}" hidden>
       <div class="field"><label for="cp">현재 비밀번호</label><input id="cp" name="current_password" type="password" autocomplete="current-password" required></div>
-      <div class="field"><label for="np">새 비밀번호</label><input id="np" name="new_password" type="password" autocomplete="new-password" minlength="8" required><span class="hint">8자 이상</span></div>
-      <div class="field"><label for="np2">새 비밀번호 확인</label><input id="np2" type="password" autocomplete="new-password" minlength="8" required></div>
+      <div class="field"><label for="np">새 비밀번호</label><input id="np" name="new_password" type="password" autocomplete="new-password" minlength="${POLICY.min_len}" required><span class="hint">${pwHint()}</span></div>
+      <div class="field"><label for="np2">새 비밀번호 확인</label><input id="np2" type="password" autocomplete="new-password" minlength="${POLICY.min_len}" required></div>
       <p class="err" id="msg" hidden></p>
-      <div class="btns"><button class="btn primary">비밀번호 변경</button><a class="btn" href="#/">취소</a></div>
+      <div class="btns"><button class="btn primary">비밀번호 변경</button>${MUST ? "" : raw('<a class="btn" href="#/">취소</a>')}</div>
     </form></div>`);
   $("#pf").onsubmit = async (ev) => {
     ev.preventDefault();
@@ -105,8 +121,10 @@ function viewPassword() {
     msg.hidden = true;
     if ($("#np").value !== $("#np2").value) { msg.hidden = false; msg.textContent = "새 비밀번호와 확인이 다릅니다."; return; }
     try {
-      await busy(ev.submitter, () => api("POST", "/api/password", { current_password: $("#cp").value, new_password: $("#np").value }));
-      toast("비밀번호를 바꿨습니다."); go("#/");
+      const r = await busy(ev.submitter, () => api("POST", "/api/password", { current_password: $("#cp").value, new_password: $("#np").value }));
+      if (r.admin) ME = r.admin;
+      MUST = false;
+      toast(ME.pw_weak ? "비밀번호를 바꿨습니다. (아직 임시 기준 비밀번호입니다)" : "강한 비밀번호로 바꿨습니다."); go("#/");
     } catch (e) { msg.hidden = false; msg.textContent = e.message; }
   };
 }
@@ -315,6 +333,7 @@ const ROUTES = [[/^#?\/?$/, viewDash], [/^#\/users$/, viewUsers], [/^#\/ideas$/,
 async function route() {
   nav();
   if (!ME) return viewLogin();
+  if (MUST) return viewPassword();
   const [path, qs] = (location.hash || "#/").split("?");
   const q = new URLSearchParams(qs || "");
   for (const [rx, fn] of ROUTES) {
@@ -328,4 +347,4 @@ async function route() {
   render('<div class="card empty">없는 화면입니다.</div>');
 }
 window.addEventListener("hashchange", route);
-(async () => { try { ME = (await api("GET", "/api/me")).admin; } catch (_) {} route(); })();
+(async () => { try { setMe(await api("GET", "/api/me")); } catch (_) {} route(); })();

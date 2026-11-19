@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS admins (
   username   TEXT UNIQUE NOT NULL,
   name       TEXT NOT NULL,
   pw         TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  pw_weak    INTEGER NOT NULL DEFAULT 0  -- 강한 비밀번호 기준에 못 미치면 1 (정식 서비스 때 변경 유도)
 );
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY,
@@ -208,6 +209,9 @@ class DB:
         self.lock = threading.RLock()
         with self.lock:
             self.conn.executescript(SCHEMA)
+            cols = {r[1] for r in self.conn.execute("PRAGMA table_info(admins)")}
+            if "pw_weak" not in cols:  # 예전에 만든 DB
+                self.conn.execute("ALTER TABLE admins ADD COLUMN pw_weak INTEGER NOT NULL DEFAULT 0")
 
     def q(self, sql: str, args=()) -> list[sqlite3.Row]:
         with self.lock:
@@ -347,12 +351,13 @@ class PgDB:
 
     @staticmethod
     def _ensure_schema(raw):
-        if raw.execute("SELECT to_regclass('public.login_fails')").fetchone()[0]:
-            return
-        sql = (Path(__file__).with_name("schema_pg.sql")).read_text(encoding="utf-8")
-        with raw.transaction():
-            raw.execute("SELECT pg_advisory_xact_lock(%s)", (LEDGER_LOCK,))
-            raw.execute(sql)
+        if not raw.execute("SELECT to_regclass('public.login_fails')").fetchone()[0]:
+            sql = (Path(__file__).with_name("schema_pg.sql")).read_text(encoding="utf-8")
+            with raw.transaction():
+                raw.execute("SELECT pg_advisory_xact_lock(%s)", (LEDGER_LOCK,))
+                raw.execute(sql)
+        # 나중에 더한 열 (이미 있으면 아무것도 안 함)
+        raw.execute("ALTER TABLE admins ADD COLUMN IF NOT EXISTS pw_weak INTEGER NOT NULL DEFAULT 0")
 
     @property
     def conn(self):  # ideabank.bundle.verify 등 .execute 만 쓰는 곳을 위한 어댑터

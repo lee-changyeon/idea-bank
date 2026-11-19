@@ -27,7 +27,7 @@ from ibweb.db import DB  # noqa: E402
 from ideabank import canonical as C  # noqa: E402
 
 USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
-MIN_PW = 8
+MIN_PW = S.PRELAUNCH_MIN  # 정식 서비스 전 최소 길이. 정식 서비스 기준은 S.STRONG_RULE
 
 
 def _password(generate: bool, visible: bool = False) -> tuple[str, bool]:
@@ -72,6 +72,7 @@ def cmd_add(db: DB, username: str, name: str, generate: bool, visible: bool = Fa
     pw, gen = _password(generate, visible)
     db.exec("INSERT INTO admins (username, name, pw, created_at) VALUES (?,?,?,?)",
             (username, name, S.hash_password(pw), C.now_iso()))
+    db.exec("UPDATE admins SET pw_weak=? WHERE username=?", (0 if S.admin_pw_strong(pw) else 1, username))
     svc.audit(db, None, "관리자 계정 추가", username, {"name": name, "via": "manage_admins.py"}, "cli")
     print(f"추가했습니다: {username} ({name})")
     if gen:
@@ -82,7 +83,8 @@ def cmd_passwd(db: DB, username: str, generate: bool, visible: bool = False):
     if not db.val("SELECT 1 FROM admins WHERE username=?", (username,)):
         sys.exit(f"없는 관리자 아이디입니다: {username}")
     pw, gen = _password(generate, visible)
-    db.exec("UPDATE admins SET pw=? WHERE username=?", (S.hash_password(pw), username))
+    db.exec("UPDATE admins SET pw=?, pw_weak=? WHERE username=?",
+            (S.hash_password(pw), 0 if S.admin_pw_strong(pw) else 1, username))
     svc.audit(db, None, "관리자 비밀번호 변경", username, {"via": "manage_admins.py"}, "cli")
     print(f"비밀번호를 바꿨습니다: {username}")
     if gen:
