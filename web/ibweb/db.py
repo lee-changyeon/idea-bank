@@ -316,7 +316,15 @@ class PgDB:
     # 연결: 인스턴스마다 1개를 재사용, 끊기면 다시 연결 (Supabase 트랜잭션 풀러 → prepare 끔)
     def _connect(self):
         import psycopg  # Postgres 모드에서만 필요 (requirements.txt)
-        self._raw = psycopg.connect(self.url, autocommit=True, prepare_threshold=None, connect_timeout=10)
+        try:
+            self._raw = psycopg.connect(self.url, autocommit=True, prepare_threshold=None, connect_timeout=10)
+        except psycopg.OperationalError:
+            # 서버 로그용 진단 (비밀번호 자체는 남기지 않는다): 주소 형식이 맞는지 확인하는 데 쓴다
+            from urllib.parse import urlparse
+            u = urlparse(self.url)
+            print(f"[DB] 연결 실패: user={u.username!r} host={u.hostname!r} port={u.port} db={u.path!r} "
+                  f"password_length={len(u.password or '')} password_has_space={(u.password or '') != (u.password or '').strip()}")
+            raise
         if not self._schema_ok:
             self._ensure_schema(self._raw)
             self._schema_ok = True
