@@ -21,7 +21,10 @@ function nav() {
   if (lo) lo.onclick = async () => { await api("POST", "/api/logout"); ME = null; IB.setCsrf(null); route(); };
 }
 
-function viewLogin() {
+async function viewLogin() {
+  let setup = false;
+  try { setup = (await api("GET", "/api/setup")).needed; } catch (_) {}
+  if (setup) return viewSetup();
   render(html`<div class="auth card stack"><div><h1>관리자 로그인</h1><p class="lead">운영자 전용입니다. 모든 행동은 감사 로그에 남습니다.</p></div>
     <form class="form" id="f">
       <div class="field"><label for="u">관리자 아이디</label><input id="u" name="username" type="text" autocomplete="username" required></div>
@@ -32,6 +35,29 @@ function viewLogin() {
     ev.preventDefault();
     try { const r = await busy(ev.submitter, () => api("POST", "/api/login", IB.formData(ev.target))); ME = r.admin; route(); }
     catch (e) { $("#msg").hidden = false; $("#msg").textContent = e.message; }
+  };
+}
+
+// ── 첫 관리자 만들기 (관리자가 아직 없고 운영자가 설정 토큰을 켜 둔 경우만) ──
+function viewSetup() {
+  render(html`<div class="auth card stack"><div><h1>첫 관리자 만들기</h1><p class="lead">관리자 계정이 아직 없습니다. Vercel 환경 변수 <b>ADMIN_SETUP_TOKEN</b> 에 넣은 값을 적고 첫 관리자 계정을 만드세요. 한 명이 만들어지면 이 화면은 다시 열리지 않습니다.</p></div>
+    <form class="form" id="sf">
+      <div class="field"><label for="st">설정 토큰</label><input id="st" name="token" type="password" autocomplete="off" required></div>
+      <div class="field"><label for="su">관리자 아이디</label><input id="su" name="username" type="text" autocomplete="username" pattern="[a-z][a-z0-9_]{1,31}" required><span class="hint">영문 소문자로 시작, 2~32자 (예: ceo)</span></div>
+      <div class="field"><label for="sn">이름</label><input id="sn" name="name" type="text" required></div>
+      <div class="field"><label for="sp">비밀번호</label><input id="sp" name="password" type="password" autocomplete="new-password" minlength="12" required><span class="hint">12자 이상</span></div>
+      <div class="field"><label for="sp2">비밀번호 확인</label><input id="sp2" type="password" autocomplete="new-password" minlength="12" required></div>
+      <p class="err" id="msg" hidden></p><button class="btn primary">관리자 만들기</button>
+    </form></div>`);
+  $("#sf").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const msg = $("#msg");
+    if ($("#sp").value !== $("#sp2").value) { msg.hidden = false; msg.textContent = "두 비밀번호가 다릅니다."; return; }
+    try {
+      await busy(ev.submitter, () => api("POST", "/api/setup", IB.formData(ev.target)));
+      toast("관리자 계정을 만들었습니다. 로그인해 주세요.");
+      viewLogin();
+    } catch (e) { msg.hidden = false; msg.textContent = e.message; }
   };
 }
 

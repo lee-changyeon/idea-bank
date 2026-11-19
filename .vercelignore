@@ -1,7 +1,6 @@
-# 사용자 웹(web/) 함수 묶음에 필요 없는 것 — 관리자 사이트는 로컬 전용
+# 온라인 함수 묶음(사용자 웹 + 관리자 사이트)에 필요 없는 것
 /server.py
 /static
-/admin
 /meeting
 /docs
 /brand

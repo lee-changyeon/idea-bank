@@ -6,7 +6,7 @@
       "use": "@vercel/python",
       "config": {
         "maxDuration": 60,
-        "includeFiles": ["web/server.py", "web/ibweb/**", "web/static/**", "ideabank/**", "config.json"]
+        "includeFiles": ["web/server.py", "web/ibweb/**", "web/static/**", "admin/server.py", "admin/static/**", "ideabank/**", "config.json"]
       }
     }
   ],

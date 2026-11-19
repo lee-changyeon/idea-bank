@@ -5,7 +5,10 @@
 """
 from __future__ import annotations
 
+import hmac
 import json
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -13,15 +16,17 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "web"))
 
 from ibweb import config, ledger as L, security as S, service as svc  # noqa: E402
-from ibweb.db import DB  # noqa: E402
-from ibweb.httpkit import App, HttpError, notfound  # noqa: E402
+from ibweb.db import open_db  # noqa: E402
+from ibweb.httpkit import ON_VERCEL, App, HttpError, bad, forbidden, notfound  # noqa: E402
+from ideabank import canonical as C  # noqa: E402
 
 CFG = config.load()
-db = DB()
-stamper = L.Stamper(db, CFG["tsa_urls"])
+db = open_db()  # DATABASE_URL 이 있으면 Postgres(Supabase), 없으면 web/data 의 SQLite
+stamper = L.Stamper(db, CFG["tsa_urls"], inline=ON_VERCEL)
 # 관리자 정적 파일 먼저, 공용 CSS·로고는 web/static 에서
 app = App("아이디어뱅크 관리자", db, "admin", "ib_admin", [HERE / "static", HERE.parent / "web" / "static"])
-throttle = S.Throttle()
+throttle = S.Throttle(db=db)
+USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
 
 
 def admin_public(a):
@@ -31,6 +36,47 @@ def admin_public(a):
 @app.route("GET", "/api/me")
 def r_me(req):
     return {"admin": admin_public(req.user) if req.user else None, "csrf": req.session["csrf"] if req.session else None}
+
+
+# ── 첫 관리자 만들기 (온라인 전용) ──
+# 관리자 계정이 하나도 없고, Vercel 환경 변수 ADMIN_SETUP_TOKEN 이 있을 때만 열린다. 한 명이 만들어지면 영영 닫힌다.
+def _setup_token() -> str:
+    return os.environ.get("ADMIN_SETUP_TOKEN", "").strip()
+
+
+@app.route("GET", "/api/setup")
+def r_setup_state(req):
+    return {"needed": bool(_setup_token()) and not db.val("SELECT COUNT(*) FROM admins")}
+
+
+@app.route("POST", "/api/setup")
+def r_setup(req):
+    token = _setup_token()
+    key = f"{req.ip}|setup"
+    if throttle.blocked(key):
+        raise HttpError(429, "시도가 많아 10분 동안 잠겼습니다.")
+    if not token:
+        raise forbidden("첫 관리자 만들기가 꺼져 있습니다.")
+    if not hmac.compare_digest(str(req.get("token")), token):
+        throttle.fail(key)
+        raise forbidden("설정 토큰이 맞지 않습니다.")
+    username = str(req.get("username")).strip().lower()
+    name = C.text(str(req.get("name"))).strip()
+    pw = str(req.get("password"))
+    if not USERNAME_RE.match(username):
+        raise bad("아이디는 영문 소문자로 시작하는 2~32자(a-z, 0-9, _)입니다.")
+    if not name:
+        raise bad("이름을 적어 주세요.")
+    if len(pw) < 12:
+        raise bad("온라인 관리자 비밀번호는 12자 이상으로 정해 주세요.")
+    with db.tx() as conn:  # 동시에 두 명이 만들지 못하도록 쓰기 잠금 안에서 다시 확인
+        if conn.execute("SELECT COUNT(*) FROM admins").fetchone()[0]:
+            raise forbidden("이미 관리자 계정이 있습니다. 로그인해 주세요.")
+        conn.execute("INSERT INTO admins (username, name, pw, created_at) VALUES (?,?,?,?)",
+                     (username, name, S.hash_password(pw), C.now_iso()))
+    a = db.one("SELECT * FROM admins WHERE username=?", (username,))
+    svc.audit(db, a, "첫 관리자 계정 만들기", username, {"via": "setup"}, req.ip)
+    return {"ok": True}
 
 
 @app.route("POST", "/api/login")
