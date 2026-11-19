@@ -83,7 +83,7 @@ def r_ledger_verify(req):
 
 @app.route("GET", "/api/cron/tsa")
 def r_cron_tsa(req):
-    """Vercel Cron: 공인 시각을 못 받은 이벤트를 다시 시도. Authorization: Bearer <CRON_SECRET> 일 때만."""
+    """Vercel Cron(매일 03:00 UTC, vercel.json): 공인 시각을 못 받은 이벤트를 다시 시도. Authorization: Bearer <CRON_SECRET> 일 때만."""
     secret = os.environ.get("CRON_SECRET", "")
     got = req.h.headers.get("Authorization") or ""
     if not secret or not hmac.compare_digest(got, f"Bearer {secret}"):
