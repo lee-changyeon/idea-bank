@@ -63,7 +63,8 @@
 ## 6. HTTP (`httpkit.py`, `api/index.py`)
 
 - Vercel 파이썬 런타임은 `api/*.py` 의 `handler`(`BaseHTTPRequestHandler` 하위 클래스)를 부른다. 기존 `Handler` 를 그대로 쓴다.
-- `vercel.json` 이 모든 경로를 `/api/index` 로 넘기고, 함수가 정적 파일(`web/static`)도 직접 준다. 보안 헤더·CSP 가 정적 파일에도 똑같이 붙는다.
+- `vercel.json` 은 `builds`(`@vercel/python`, `api/index.py`) + `routes` 로 모든 경로를 이 함수로 넘긴다. 함수가 정적 파일(`web/static`)도 직접 준다. 보안 헤더·CSP 가 정적 파일에도 똑같이 붙는다.
+  - `functions` 설정만 쓰면 Vercel 이 `api/index.py` 를 함수로 인식하지 못해 빌드가 실패했다(`unused_function`). 그래서 `builds` 로 명시한다.
 - 접속 IP 는 `X-Forwarded-For` 의 첫 값을 쓴다(Vercel 일 때만 믿는다).
 - 쓰기 요청의 `Origin` 검사, CSRF, `Content-Type` 검사는 그대로.
 - 사용자 웹에 공개 `GET /api/ledger/verify`(원장 무결성 검사: 해시·순번·공인 시각·첨부 해시, 내용은 돌려주지 않음)를 더한다. 검증 화면에 [원장 무결성 검사] 버튼을 둔다.
@@ -84,3 +85,11 @@
 - 기존 `idea-bank-meeting` 프로젝트(Root Directory `meeting/`)는 건드리지 않는다. 루트의 `vercel.json` 은 그 프로젝트에 영향을 주지 않는다.
 - `.vercelignore` 로 함수 묶음에서 문서·회의실·v1 정적 파일 등을 뺀다.
 - 온라인 DB 는 빈 상태로 시작한다(데모 데이터 없음).
+
+## 9. 현재 배포 (2026-11-19)
+
+- 주소: https://idea-bank-web-omega.vercel.app (Vercel 프로젝트 `idea-bank-web`)
+- Supabase 프로젝트 `idea-bank-web` (서울, ap-northeast-2). Storage 버킷 `ideabank-files` 는 첫 첨부 저장 때 자동으로 만들어졌다.
+- 점검: `python web/tools/smoke.py https://idea-bank-web-omega.vercel.app` 를 돌린다.
+  - 결과: 가입, 공인 시각(DigiCert), 첨부 Storage, NDA, 열람 기록, 공개 단계, 원장 무결성, 증명 파일(웹 + v1 검증기), Secure 쿠키를 모두 통과했다.
+- 확인한 보안: anon 키로 REST API 를 불러도 `users`·`events` 를 읽을 수 없다(permission denied). `/api/cron/tsa` 는 비밀 값 없이 부르면 403 을 준다.
