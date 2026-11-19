@@ -93,3 +93,12 @@
 - 점검: `python web/tools/smoke.py https://idea-bank-web-omega.vercel.app` 를 돌린다.
   - 결과: 가입, 공인 시각(DigiCert), 첨부 Storage, NDA, 열람 기록, 공개 단계, 원장 무결성, 증명 파일(웹 + v1 검증기), Secure 쿠키를 모두 통과했다.
 - 확인한 보안: anon 키로 REST API 를 불러도 `users`·`events` 를 읽을 수 없다(permission denied). `/api/cron/tsa` 는 비밀 값 없이 부르면 403 을 준다.
+
+## 10. DB 비밀번호 바꾸기
+
+1. Supabase → Database → Settings → **Reset password**. 영문과 숫자로만 정하세요. 특수문자는 주소에서 깨집니다.
+2. Vercel → Environment Variables → `DATABASE_URL` → Edit 에서 비밀번호 부분을 바꾸고 Save 합니다.
+   - 본인 확인 코드까지 입력해야 저장됩니다. 목록에 "Updated just now" 가 보이는지 확인하세요.
+3. **다시 배포**해야 적용됩니다. Deployments → ⋯ → Redeploy, 또는 `main` 에 푸시하면 됩니다.
+4. 연결에 실패하면 Vercel Runtime Logs 에서 `[DB] 연결 실패` 줄을 찾습니다.
+   - 사용자 이름·호스트·포트·비밀번호 길이가 나옵니다. 비밀번호 자체는 남기지 않습니다.
