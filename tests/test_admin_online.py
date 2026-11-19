@@ -120,6 +120,22 @@ class AdminOnlineTest(unittest.TestCase):
         self.assertTrue(aud["integrity"]["ok"])
         self.assertTrue(any(r["action"] == "첫 관리자 계정 만들기" for r in aud["audit"]))
 
+        # 비밀번호를 잊었을 때: 토큰이 틀리면 거부, 맞으면 재설정 + 기존 로그인 끊김 + 감사 로그
+        self.assertTrue(admin.call("GET", "/api/setup")[1]["recovery"])
+        other = Client(self.port, ADMIN_HOST)
+        rec = {"token": "wrong", "username": "ceo", "password": "brand-new-password-456"}
+        self.assertEqual(other.call("POST", "/api/recover", rec)[0], 403)
+        self.assertEqual(other.call("POST", "/api/recover", {**rec, "token": TOKEN, "username": "nobody"})[0], 400)
+        self.assertEqual(other.call("POST", "/api/recover", {**rec, "token": TOKEN, "password": "short"})[0], 400)
+        self.assertEqual(other.call("POST", "/api/recover", {**rec, "token": TOKEN})[0], 200)
+        self.assertEqual(admin.call("GET", "/api/dashboard")[0], 401)  # 기존 세션은 끊김
+        self.assertEqual(other.call("POST", "/api/login", {"username": "ceo", "password": "a-long-password-123"})[0], 401)
+        st, _ = other.call("POST", "/api/login", {"username": "ceo", "password": "brand-new-password-456"})
+        self.assertEqual(st, 200)
+        st, aud = other.call("GET", "/api/audit")
+        self.assertTrue(aud["integrity"]["ok"])
+        self.assertTrue(any(r["action"] == "비밀번호 재설정 (설정 토큰)" for r in aud["audit"]))
+
         # 관리자 쿠키는 사용자 주소에서 쓰이지 않는다 (호스트별 쿠키)
         self.assertIsNone(user.call("GET", "/api/me")[1]["user"])
 

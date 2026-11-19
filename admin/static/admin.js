@@ -22,15 +22,18 @@ function nav() {
 }
 
 async function viewLogin() {
-  let setup = false;
-  try { setup = (await api("GET", "/api/setup")).needed; } catch (_) {}
-  if (setup) return viewSetup();
+  let st = {};
+  try { st = await api("GET", "/api/setup"); } catch (_) {}
+  if (st.needed) return viewSetup();
   render(html`<div class="auth card stack"><div><h1>관리자 로그인</h1><p class="lead">운영자 전용입니다. 모든 행동은 감사 로그에 남습니다.</p></div>
     <form class="form" id="f">
       <div class="field"><label for="u">관리자 아이디</label><input id="u" name="username" type="text" autocomplete="username" required></div>
       <div class="field"><label for="p">비밀번호</label><input id="p" name="password" type="password" autocomplete="current-password" required></div>
       <p class="err" id="msg" hidden></p><button class="btn primary">로그인</button>
-    </form></div>`);
+    </form>
+    <p class="small muted">${st.recovery ? raw('<a href="#" id="forgot">비밀번호를 잊었나요?</a>') : "비밀번호를 잊었으면 다른 관리자나 운영자에게 재설정을 요청하세요."}</p></div>`);
+  const fg = $("#forgot");
+  if (fg) fg.onclick = (e) => { e.preventDefault(); viewRecover(); };
   $("#f").onsubmit = async (ev) => {
     ev.preventDefault();
     try { const r = await busy(ev.submitter, () => api("POST", "/api/login", IB.formData(ev.target))); ME = r.admin; route(); }
@@ -56,6 +59,30 @@ function viewSetup() {
     try {
       await busy(ev.submitter, () => api("POST", "/api/setup", IB.formData(ev.target)));
       toast("관리자 계정을 만들었습니다. 로그인해 주세요.");
+      viewLogin();
+    } catch (e) { msg.hidden = false; msg.textContent = e.message; }
+  };
+}
+
+// ── 비밀번호를 잊었을 때: 설정 토큰(ADMIN_SETUP_TOKEN)으로 재설정 ──
+function viewRecover() {
+  render(html`<div class="auth card stack"><div><h1>관리자 비밀번호 재설정</h1><p class="lead">Vercel 환경 변수 <b>ADMIN_SETUP_TOKEN</b> 값을 아는 운영자만 쓸 수 있습니다. 재설정하면 그 계정은 모든 기기에서 로그아웃되고, 감사 로그에 남습니다.</p></div>
+    <form class="form" id="rf">
+      <div class="field"><label for="rt">설정 토큰</label><input id="rt" name="token" type="password" autocomplete="off" required></div>
+      <div class="field"><label for="ru">관리자 아이디</label><input id="ru" name="username" type="text" autocomplete="username" required></div>
+      <div class="field"><label for="rp">새 비밀번호</label><input id="rp" name="password" type="password" autocomplete="new-password" minlength="12" required><span class="hint">12자 이상</span></div>
+      <div class="field"><label for="rp2">새 비밀번호 확인</label><input id="rp2" type="password" autocomplete="new-password" minlength="12" required></div>
+      <p class="err" id="msg" hidden></p>
+      <div class="btns"><button class="btn primary">비밀번호 재설정</button><a class="btn" href="#" id="back">로그인으로</a></div>
+    </form></div>`);
+  $("#back").onclick = (e) => { e.preventDefault(); viewLogin(); };
+  $("#rf").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const msg = $("#msg");
+    if ($("#rp").value !== $("#rp2").value) { msg.hidden = false; msg.textContent = "두 비밀번호가 다릅니다."; return; }
+    try {
+      await busy(ev.submitter, () => api("POST", "/api/recover", IB.formData(ev.target)));
+      toast("비밀번호를 바꿨습니다. 새 비밀번호로 로그인해 주세요.");
       viewLogin();
     } catch (e) { msg.hidden = false; msg.textContent = e.message; }
   };

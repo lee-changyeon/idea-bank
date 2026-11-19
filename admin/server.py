@@ -38,28 +38,54 @@ def r_me(req):
     return {"admin": admin_public(req.user) if req.user else None, "csrf": req.session["csrf"] if req.session else None}
 
 
-# ── 첫 관리자 만들기 (온라인 전용) ──
-# 관리자 계정이 하나도 없고, Vercel 환경 변수 ADMIN_SETUP_TOKEN 이 있을 때만 열린다. 한 명이 만들어지면 영영 닫힌다.
+# ── 첫 관리자 만들기 · 비밀번호 잊었을 때 재설정 (온라인 전용) ──
+# 둘 다 Vercel 환경 변수 ADMIN_SETUP_TOKEN 을 아는 사람만 쓸 수 있다 (= Vercel 프로젝트에 접근할 수 있는 사람).
+# - 첫 관리자 만들기: 관리자 계정이 하나도 없을 때만. 한 명이 만들어지면 닫힌다.
+# - 비밀번호 재설정: 토큰 + 관리자 아이디 + 새 비밀번호. 그 관리자의 모든 로그인을 끊고 감사 로그에 남긴다.
+# 토큰을 지우면 두 기능 모두 꺼진다. 로컬에서는 python web/manage_admins.py passwd <아이디> 를 쓴다.
 def _setup_token() -> str:
     return os.environ.get("ADMIN_SETUP_TOKEN", "").strip()
 
 
 @app.route("GET", "/api/setup")
 def r_setup_state(req):
-    return {"needed": bool(_setup_token()) and not db.val("SELECT COUNT(*) FROM admins")}
+    on = bool(_setup_token())
+    return {"needed": on and not db.val("SELECT COUNT(*) FROM admins"), "recovery": on}
+
+
+def _check_token(req, key: str):
+    token = _setup_token()
+    if throttle.blocked(key):
+        raise HttpError(429, "시도가 많아 10분 동안 잠겼습니다.")
+    if not token:
+        raise forbidden("이 기능은 꺼져 있습니다. 운영자가 Vercel 에 ADMIN_SETUP_TOKEN 을 넣어야 합니다.")
+    if not hmac.compare_digest(str(req.get("token")), token):
+        throttle.fail(key)
+        raise forbidden("설정 토큰이 맞지 않습니다.")
+    throttle.clear(key)
+
+
+@app.route("POST", "/api/recover")
+def r_recover(req):
+    """비밀번호를 잊은 관리자: 설정 토큰으로 새 비밀번호를 정한다."""
+    username = str(req.get("username")).strip().lower()
+    _check_token(req, f"{req.ip}|recover")
+    pw = str(req.get("password"))
+    if len(pw) < 12:
+        raise bad("새 비밀번호는 12자 이상으로 정해 주세요.")
+    a = db.one("SELECT * FROM admins WHERE username=?", (username,))
+    if not a:
+        raise bad("그런 관리자 아이디가 없습니다.")
+    db.exec("UPDATE admins SET pw=? WHERE id=?", (S.hash_password(pw), a["id"]))
+    db.exec("DELETE FROM sessions WHERE kind='admin' AND subject_id=?", (a["id"],))  # 모든 기기에서 로그아웃
+    throttle.clear(f"{req.ip}|{username}")
+    svc.audit(db, a, "비밀번호 재설정 (설정 토큰)", username, {"via": "recover"}, req.ip)
+    return {"ok": True}
 
 
 @app.route("POST", "/api/setup")
 def r_setup(req):
-    token = _setup_token()
-    key = f"{req.ip}|setup"
-    if throttle.blocked(key):
-        raise HttpError(429, "시도가 많아 10분 동안 잠겼습니다.")
-    if not token:
-        raise forbidden("첫 관리자 만들기가 꺼져 있습니다.")
-    if not hmac.compare_digest(str(req.get("token")), token):
-        throttle.fail(key)
-        raise forbidden("설정 토큰이 맞지 않습니다.")
+    _check_token(req, f"{req.ip}|setup")
     username = str(req.get("username")).strip().lower()
     name = C.text(str(req.get("name"))).strip()
     pw = str(req.get("password"))
