@@ -129,6 +129,14 @@ const IB = (() => {
       try { msg = (await r.json()).error || msg; } catch (_) {}
       throw new Error(msg);
     }
+    // 온라인 큰 파일: 서버가 Storage 서명 주소(5분)를 주면 브라우저가 그 주소에서 바로 받는다
+    if ((r.headers.get("Content-Type") || "").includes("json")) {
+      const j = await r.json();
+      if (!j.download_url) throw new Error("내려받을 주소를 받지 못했습니다.");
+      const a = document.createElement("a");
+      a.href = j.download_url; a.rel = "noopener"; document.body.append(a); a.click(); a.remove();
+      return;
+    }
     const cd = r.headers.get("Content-Disposition") || "";
     const m = /filename\*=UTF-8''([^;]+)/.exec(cd);
     const name = m ? decodeURIComponent(m[1]) : "download";

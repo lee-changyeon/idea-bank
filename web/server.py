@@ -13,8 +13,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from ibweb import config, ledger as L, proof, security as S, service as svc  # noqa: E402
+from ibweb import config, files as F, ledger as L, proof, security as S, service as svc  # noqa: E402
 from ibweb.db import open_db  # noqa: E402
+from ideabank import canonical as C  # noqa: E402
 from ibweb.httpkit import ON_VERCEL, App, HttpError, Response, bad, download, forbidden  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
@@ -106,7 +107,13 @@ def r_cron_tsa(req):
     got = req.h.headers.get("Authorization") or ""
     if not secret or not hmac.compare_digest(got, f"Bearer {secret}"):
         raise forbidden()
-    return stamper.run_pending(limit=40, deadline=time.monotonic() + 50)
+    out = stamper.run_pending(limit=40, deadline=time.monotonic() + 45)
+    if F.direct():
+        try:
+            out["cleaned_uploads"] = F.store().cleanup()  # 등록 안 된 임시 업로드·오래된 증명 zip 정리
+        except Exception as ex:
+            out["cleanup_error"] = str(ex)[:200]
+    return out
 
 
 @app.route("GET", "/api/lookup/{h}")
@@ -161,17 +168,33 @@ def r_restamp(req):
     return svc.restamp(db, stamper, req.user, req.params["seq"])
 
 
+def file_out(a: dict):
+    """첨부 내려받기. 온라인은 Storage 서명 주소(5분)를 돌려주고 브라우저가 바로 받는다(함수 응답 4.5MB 한도)."""
+    if F.direct():
+        return {"download_url": F.store().sign_download(a["sha256"], a["name"]), "name": a["name"]}
+    return download(F.get(a["sha256"]), a["name"])
+
+
+@app.route("POST", "/api/my/uploads", auth="creator")
+def r_upload(req):
+    """첨부를 Storage 로 직접 올릴 주소 (온라인 전용)."""
+    return svc.start_upload(req.user, req.get("name"), req.get("size"))
+
+
 @app.route("GET", "/api/my/ideas/{seq}/bundle", auth="creator")
 def r_bundle(req):
     name, data = proof.make(db, svc.own_idea(db, req.user, req.params["seq"]))
+    if F.direct() and len(data) > 3 * 1024 * 1024:  # 큰 증명 파일은 Storage 에 두고 서명 주소로
+        key = f"bundles/{C.sha256_hex(data)}.zip"
+        F.store().put_key(key, data)
+        return {"download_url": F.store().sign_download(key, name), "name": name}
     return download(data, name, "application/zip")
 
 
 @app.route("GET", "/api/my/ideas/{seq}/files/{sha}", auth="creator")
 def r_my_file(req):
     svc.own_idea(db, req.user, req.params["seq"])
-    a, data = svc.attachment(db, req.params["seq"], req.params["sha"])
-    return download(data, a["name"])
+    return file_out(svc.attachment_meta(db, req.params["seq"], req.params["sha"]))
 
 
 @app.route("GET", "/api/my/views", auth="creator")
@@ -207,8 +230,7 @@ def r_market_full(req):
 
 @app.route("GET", "/api/market/{seq}/files/{sha}", auth="business")
 def r_market_file(req):
-    a, data = svc.market_file(db, stamper, req.user, req.params["seq"], req.params["sha"])
-    return download(data, a["name"])
+    return file_out(svc.market_file(db, stamper, req.user, req.params["seq"], req.params["sha"]))
 
 
 @app.route("POST", "/api/market/{seq}/nda", auth="business")

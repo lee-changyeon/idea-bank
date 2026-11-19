@@ -9,12 +9,18 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
+from urllib.parse import quote
 
 from .db import DATA_DIR
 
 _SHA = re.compile(r"^[0-9a-f]{64}$")
+# 브라우저가 직접 올리는 임시 파일: incoming/<사용자 id>/<무작위 32자>
+INCOMING = re.compile(r"^incoming/(\d+)/[0-9a-f]{32}$")
+BUNDLE = re.compile(r"^bundles/[0-9a-f]{64}\.zip$")
 
 
 def _check(sha: str) -> str:
@@ -93,6 +99,83 @@ class SupabaseFiles:
         st, _ = self._req("HEAD", f"/object/authenticated/{self.bucket}/{_check(sha)}")
         return st == 200
 
+    # ── 브라우저 직접 올리기·내려받기 (Vercel 함수의 4.5MB 요청·응답 한도를 피한다) ──
+    def _json(self, method, path, obj, timeout=30):
+        st, out = self._req(method, path, json.dumps(obj).encode(), {"Content-Type": "application/json"}, timeout)
+        try:
+            return st, json.loads(out or b"{}")
+        except ValueError:
+            return st, {"raw": out[:200]}
+
+    def sign_upload(self, key: str) -> str:
+        """브라우저가 PUT 으로 한 번 올릴 수 있는 주소 (2시간 유효, 덮어쓰기 불가)."""
+        assert INCOMING.match(key)
+        self._ensure_bucket()
+        st, out = self._json("POST", f"/object/upload/sign/{self.bucket}/{key}", {})
+        if st not in (200, 201) or "url" not in out:
+            raise RuntimeError(f"올리기 주소를 만들지 못했습니다 ({st}): {out}")
+        return self.base + out["url"]
+
+    def sign_download(self, key: str, filename: str, expires: int = 300) -> str:
+        """잠깐(기본 5분) 쓸 수 있는 내려받기 주소. 파일 이름을 붙여 바로 저장되게 한다."""
+        assert _SHA.match(key) or BUNDLE.match(key)
+        st, out = self._json("POST", f"/object/sign/{self.bucket}/{key}", {"expiresIn": expires})
+        url = out.get("signedURL") or out.get("signedUrl")
+        if st not in (200, 201) or not url:
+            raise RuntimeError(f"내려받기 주소를 만들지 못했습니다 ({st}): {out}")
+        return f"{self.base}{url}&download={quote(filename)}"
+
+    def get_key(self, key: str) -> bytes:
+        assert INCOMING.match(key) or BUNDLE.match(key)
+        st, out = self._req("GET", f"/object/authenticated/{self.bucket}/{key}", timeout=60)
+        if st != 200:
+            raise FileNotFoundError(key)
+        return out
+
+    def put_key(self, key: str, data: bytes):
+        assert BUNDLE.match(key)
+        self._ensure_bucket()
+        st, out = self._req("POST", f"/object/{self.bucket}/{key}", data,
+                            {"Content-Type": "application/zip", "x-upsert": "true"}, timeout=60)
+        if st not in (200, 201):
+            raise RuntimeError(f"Storage 저장 실패 ({st}): {out[:200]!r}")
+
+    def adopt(self, key: str, sha: str):
+        """임시 업로드를 내용 해시 이름으로 옮긴다. 같은 내용이 이미 있으면 임시 파일만 지운다."""
+        assert INCOMING.match(key) and _SHA.match(sha)
+        st, _ = self._json("POST", "/object/move", {"bucketId": self.bucket, "sourceKey": key, "destinationKey": sha})
+        if st not in (200, 201):
+            self.delete_keys([key])
+
+    def delete_keys(self, keys: list[str]):
+        if keys:
+            self._json("DELETE", f"/object/{self.bucket}", {"prefixes": keys})
+
+    def cleanup(self, max_age_hours: float = 24) -> int:
+        """등록되지 않고 남은 임시 업로드와 오래된 증명 파일 zip 을 지운다 (Cron)."""
+        now, old = time.time(), []
+        for prefix in ("incoming/", "bundles/"):
+            st, items = self._json("POST", f"/object/list/{self.bucket}", {"prefix": prefix, "limit": 1000})
+            for it in items if isinstance(items, list) else []:
+                if it.get("id") is None:  # 폴더(incoming/<사용자 id>)
+                    st2, sub_items = self._json("POST", f"/object/list/{self.bucket}",
+                                                {"prefix": prefix + it["name"] + "/", "limit": 1000})
+                    for s in sub_items if isinstance(sub_items, list) else []:
+                        if _old(s, now, max_age_hours):
+                            old.append(prefix + it["name"] + "/" + s["name"])
+                elif _old(it, now, max_age_hours):
+                    old.append(prefix + it["name"])
+        self.delete_keys(old)
+        return len(old)
+
+
+def _old(item: dict, now: float, hours: float) -> bool:
+    try:
+        t = datetime.fromisoformat(str(item.get("created_at")).replace("Z", "+00:00"))
+        return now - t.replace(tzinfo=t.tzinfo or timezone.utc).timestamp() > hours * 3600
+    except ValueError:
+        return False
+
 
 _store = None
 
@@ -119,3 +202,8 @@ def get(sha: str) -> bytes:
 
 def exists(sha: str) -> bool:
     return store().exists(sha)
+
+
+def direct() -> bool:
+    """브라우저가 Storage 로 직접 올리고 받는가 (온라인). 로컬은 서버를 거친다."""
+    return store().kind == "supabase"

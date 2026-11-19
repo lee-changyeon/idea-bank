@@ -5,7 +5,7 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const main = $("#main");
 let ME = null;
-let LIMITS = { max_file: 20 * 1048576, max_total: 200 * 1048576 }; // 서버가 /api/me 로 알려 준다 (온라인은 더 작음)
+let LIMITS = { max_file: 20 * 1048576, max_total: 200 * 1048576, direct: false }; // 서버가 /api/me 로 알려 준다
 const mb = (n) => `${Math.round(n / 1048576)}MB`;
 
 const LEVELS = {
@@ -194,12 +194,29 @@ async function viewNew(q) {
         title: fd.get("title"), body: fd.get("body"), tags: String(fd.get("tags") || "").split(/[,\n]/).map((s) => s.trim()).filter(Boolean),
         disclosure: fd.get("disclosure"), summary: fd.get("summary") || "", timestamp: !!fd.get("timestamp"),
         parent_seq: parent ? parent.seq : null,
-        attachments: await Promise.all(files.map(async (f) => ({ name: f.name, mime: f.type, data_b64: b64(await f.arrayBuffer()) }))),
+        attachments: await prepareFiles(files, ev.submitter),
       }));
       sessionStorage.setItem("ib_new", d.seq);
       go(`#/idea/${d.seq}`);
     } catch (e) { $("#msg").hidden = false; $("#msg").textContent = e.message; }
   };
+}
+
+// 첨부 준비: 온라인은 Storage 로 직접 올리고(파일당 20MB) 경로만 보낸다. 로컬은 내용을 그대로 보낸다.
+async function prepareFiles(files, btn) {
+  const out = [];
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    const mime = f.type || "application/octet-stream";
+    if (!LIMITS.direct) { out.push({ name: f.name, mime, data_b64: b64(await f.arrayBuffer()) }); continue; }
+    if (btn) btn.innerHTML = `<span class="spin"></span> 첨부 올리는 중 (${i + 1}/${files.length})`;
+    const up = await api("POST", "/api/my/uploads", { name: f.name, size: f.size, mime });
+    const r = await fetch(up.url, { method: "PUT", headers: { "Content-Type": mime, "x-upsert": "false" }, body: f });
+    if (!r.ok) throw new Error(`첨부 '${f.name}' 를 올리지 못했습니다 (${r.status}). 다시 시도해 주세요.`);
+    out.push({ name: f.name, mime, upload_path: up.path });
+  }
+  if (btn && files.length) btn.innerHTML = '<span class="spin"></span> 등록 중';
+  return out;
 }
 
 // ───────── 창안자: 보관함 ─────────
@@ -564,6 +581,10 @@ async function viewVerify() {
   };
   $("#zf").onchange = async (e) => {
     const f = e.target.files[0]; if (!f) return;
+    if (LIMITS.direct && f.size > 3 * 1048576) {  // 온라인 서버는 요청 4.5MB 한도
+      $("#zr").innerHTML = String(html`<div class="note amber"><b>3MB 를 넘는 증명 파일은 이 화면에서 검사할 수 없습니다.</b><p>증명 파일 안의 VERIFY.txt 안내대로 직접 검증하거나, 고유 지문(canonical.json 의 SHA-256)을 오른쪽 칸에서 찾아보세요. 원문 canonical.json 파일을 골라도 됩니다.</p></div>`);
+      e.target.value = ""; return;
+    }
     $("#zr").innerHTML = '<p class="small"><span class="spin"></span> 검사 중</p>';
     try {
       const r = await api("POST", "/api/verify/bundle", { zip_b64: b64(await f.arrayBuffer()) });

@@ -19,12 +19,16 @@ ON_VERCEL = bool(os.environ.get("VERCEL"))
 # 운영(HTTPS)에서는 쿠키에 Secure 를 붙인다. 로컬 http://localhost 에서는 붙이면 쿠키가 저장되지 않는다.
 SECURE_COOKIES = ON_VERCEL or os.environ.get("IB_SECURE_COOKIES") == "1"
 
+# 온라인: 브라우저가 첨부를 Supabase Storage 로 직접 올리므로 그 주소만 추가로 허용
+_STORAGE_ORIGIN = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+_CONNECT = "'self'" + (f" {_STORAGE_ORIGIN}" if _STORAGE_ORIGIN.startswith("https://") else "")
+
 SEC_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "same-origin",
     "Content-Security-Policy": "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
-                               "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+                               f"connect-src {_CONNECT}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
     "Cross-Origin-Opener-Policy": "same-origin",
 }
 

@@ -22,9 +22,30 @@ from .httpkit import bad, forbidden, notfound
 
 KST = timezone(timedelta(hours=9))
 MAX_FILE = 20 * 1024 * 1024
-# Vercel 함수는 요청 본문이 4.5MB 까지라, 온라인에서는 한 번에 올리는 첨부 합계를 줄인다 (base64 로 약 4/3 배가 됨)
-MAX_TOTAL = 3 * 1024 * 1024 if os.environ.get("VERCEL") else 200 * 1024 * 1024
-LIMITS = {"max_file": min(MAX_FILE, MAX_TOTAL), "max_total": MAX_TOTAL}
+# 온라인(Supabase Storage)에서는 브라우저가 Storage 로 직접 올린다 → 파일당 20MB.
+# Storage 없이 Vercel 에서 돌면 요청 본문 4.5MB 한도 때문에 합계 3MB (base64 로 약 4/3 배가 됨).
+if F.direct():
+    MAX_TOTAL = 100 * 1024 * 1024
+elif os.environ.get("VERCEL"):
+    MAX_TOTAL = 3 * 1024 * 1024
+else:
+    MAX_TOTAL = 200 * 1024 * 1024
+LIMITS = {"max_file": min(MAX_FILE, MAX_TOTAL), "max_total": MAX_TOTAL, "direct": F.direct()}
+
+
+def start_upload(user, name, size) -> dict:
+    """브라우저가 Storage 로 직접 올릴 주소를 만든다. 등록할 때 서버가 다시 내려받아 해시를 확인한다."""
+    if not F.direct():
+        raise bad("이 서버는 직접 올리기를 쓰지 않습니다.")
+    try:
+        size = int(size)
+    except (TypeError, ValueError):
+        raise bad("파일 크기를 알 수 없습니다.")
+    if size <= 0 or size > MAX_FILE:
+        raise bad(f"첨부 '{safe_name(name or 'file')}' 가 {MAX_FILE // 1048576}MB 를 넘습니다.")
+    import secrets
+    key = f"incoming/{int(user['id'])}/{secrets.token_hex(16)}"
+    return {"path": key, "url": F.store().sign_upload(key)}
 EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 DISCLOSURE = {"private": "비공개", "summary": "요약 공개", "nda": "NDA 후 전문 공개"}
 PAY_KINDS = {"upfront": "계약금", "royalty": "매출 로열티", "profit": "이익 배당", "equity": "지분"}
@@ -129,21 +150,37 @@ def create_idea(db, stamper, user, *, title, body, tags, attachments, parent_seq
 
     files = []
     total = 0
+    adopted = []  # (임시 경로, sha) — 등록이 끝나면 내용 해시 이름으로 옮긴다
     for a in attachments or []:
-        try:
-            data = base64.b64decode(a.get("data_b64") or "", validate=True)
-        except Exception:
-            raise bad("첨부파일을 읽을 수 없습니다.")
+        up = a.get("upload_path")
+        if up:  # 브라우저가 Storage 에 직접 올린 파일
+            m = F.INCOMING.match(str(up))
+            if not F.direct() or not m or int(m.group(1)) != int(user["id"]):
+                raise bad("첨부파일 경로가 올바르지 않습니다.")
+            try:
+                data = F.store().get_key(up)
+            except FileNotFoundError:
+                raise bad(f"첨부 '{a.get('name')}' 를 아직 다 올리지 못했습니다. 다시 시도해 주세요.")
+        else:
+            try:
+                data = base64.b64decode(a.get("data_b64") or "", validate=True)
+            except Exception:
+                raise bad("첨부파일을 읽을 수 없습니다.")
         if len(data) > LIMITS["max_file"]:
             raise bad(f"첨부 '{a.get('name')}' 가 {LIMITS['max_file'] // 1048576}MB 를 넘습니다.")
         total += len(data)
         if total > MAX_TOTAL:
             raise bad(f"첨부파일 합계가 {MAX_TOTAL // 1048576}MB 를 넘습니다.")
         sha = C.sha256_hex(data)
-        F.put(sha, data)
+        if up:
+            adopted.append((up, sha))
+        else:
+            F.put(sha, data)
         files.append({"name": safe_name(a.get("name") or "file"), "sha256": sha, "size": len(data),
                       "mime": (a.get("mime") or "application/octet-stream")[:100]})
 
+    for up, sha in adopted:  # 원장에 쓰기 전에 파일을 제자리에 둔다 (원장 검사가 이 이름으로 찾는다)
+        F.store().adopt(up, sha)
     created = C.now_iso()
     doc = C.build(title=title, body=body, tags=tags, author=user["name"], created_at=created,
                   parent=parent["content_hash"] if parent else None, attachments=files)
@@ -241,11 +278,16 @@ def restamp(db, stamper, user, seq) -> dict:
     return idea_detail_for_owner(db, user, d["seq"])
 
 
-def attachment(db, seq, sha) -> tuple[dict, bytes]:
+def attachment_meta(db, seq, sha) -> dict:
     a = db.one("SELECT * FROM attachments WHERE idea_seq=? AND sha256=?", (int(seq), sha))
     if not a:
         raise notfound("첨부파일을 찾을 수 없습니다.")
-    return dict(a), F.get(a["sha256"])
+    return dict(a)
+
+
+def attachment(db, seq, sha) -> tuple[dict, bytes]:
+    a = attachment_meta(db, seq, sha)
+    return a, F.get(a["sha256"])
 
 
 def views_for_ideas(db, seqs: list[int]) -> list[dict]:
@@ -362,9 +404,9 @@ def market_file(db, stamper, user, seq, sha) -> tuple[dict, bytes]:
     n = db.one("SELECT * FROM ndas WHERE idea_seq=? AND user_id=?", (r["seq"], user["id"]))
     if r["disclosure"] != "nda" or not n:
         raise forbidden("NDA에 서명해야 첨부를 볼 수 있습니다.")
-    a, data = attachment(db, r["seq"], sha)
+    a = attachment_meta(db, r["seq"], sha)
     _log_view(db, stamper, user, r, "file", detail=a["name"], nda_hash=n["doc_hash"])
-    return a, data
+    return a
 
 
 def sign_nda(db, stamper, user, seq, signer_name, agree, template_hash, ip) -> dict:
